@@ -1,0 +1,48 @@
+name: Build SaMu Lab (.deb)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Install deb packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot dpkg-dev
+
+      - name: Build .deb
+        run: gradle packageDeb --no-daemon --stacktrace
+
+      - name: Verify .deb exists
+        run: |
+          ls -la build/compose/binaries/main/deb/
+          test -n "$(find build/compose/binaries/main/deb -maxdepth 1 -name '*.deb' -print -quit)"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: samu-lab-deb
+          path: build/compose/binaries/main/deb/*.deb
+          if-no-files-found: error
+          retention-days: 30
