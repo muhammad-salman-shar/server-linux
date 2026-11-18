@@ -85,7 +85,10 @@ class ApiServer(
             }
         } catch (e: Exception) {
             val msg = (e.message ?: "unknown").replace('"', '\'')
-            jsonResponse(Response.Status.BAD_GATEWAY, """{"error":"Upstream failed: $msg"}""")
+            jsonResponse(object : Response.IStatus {
+                override fun getRequestStatus(): Int = 502
+                override fun getDescription(): String = "502 Bad Gateway"
+            }, """{"error":"Upstream failed: $msg"}""")
         }
     }
 
@@ -136,7 +139,7 @@ class ApiServer(
         return h == "Bearer ${settings.apiKey}"
     }
 
-    private fun jsonResponse(status: Response.Status, body: String): Response =
+    private fun jsonResponse(status: Response.IStatus, body: String): Response =
         newFixedLengthResponse(status, "application/json", body)
 
     private fun notFound(): Response =
