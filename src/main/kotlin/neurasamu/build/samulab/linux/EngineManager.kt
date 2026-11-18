@@ -1,6 +1,8 @@
 package neurasamu.build.samulab.linux
 
 import kotlinx.coroutines.CoroutineScope
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -123,6 +125,62 @@ class EngineManager {
             }
         }
         return false
+    }
+
+
+    fun downloadEngine(onProgress: (String) -> Unit, onDone: (Boolean, String?) -> Unit) {
+        scope.launch {
+            try {
+                val arch = System.getProperty("os.arch").lowercase()
+                val url = if (arch.contains("aarch64") || arch.contains("arm64")) {
+                    "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-ubuntu-arm64.tar.gz"
+                } else {
+                    "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-ubuntu-x64.tar.gz"
+                }
+
+                onProgress("Downloading engine ($arch)...")
+                val client = OkHttpClient.Builder().build()
+                val request = Request.Builder().url(url).build()
+                val response = client.newCall(request).execute()
+                if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+
+                val body = response.body ?: throw Exception("Empty body")
+                val tarFile = SettingsStore.appDir.resolve("llama.tar.gz").toFile()
+                body.byteStream().use { input ->
+                    tarFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                onProgress("Extracting engine...")
+                val pb = ProcessBuilder("tar", "-xzf", tarFile.absolutePath)
+                pb.directory(SettingsStore.appDir.toFile())
+                pb.redirectErrorStream(true)
+                val proc = pb.start()
+                proc.waitFor()
+
+                onProgress("Setting up binary...")
+                val extractedDir = SettingsStore.appDir.toFile().listFiles()?.find { it.isDirectory && it.name.startsWith("llama-") }
+                val bin = extractedDir?.listFiles()?.find { it.name == "llama-server" }
+                
+                if (bin != null && bin.exists()) {
+                    val dest = SettingsStore.appDir.resolve("llama-server").toFile()
+                    if (dest.exists()) dest.delete()
+                    bin.copyTo(dest, overwrite = true)
+                    
+                    ProcessBuilder("chmod", "+x", dest.absolutePath).start().waitFor()
+                    
+                    tarFile.delete()
+                    extractedDir.deleteRecursively()
+                    
+                    onDone(true, null)
+                } else {
+                    throw Exception("llama-server binary not found in archive")
+                }
+            } catch (e: Exception) {
+                onDone(false, e.message ?: "Unknown error")
+            }
+        }
     }
 
     fun shutdown() {

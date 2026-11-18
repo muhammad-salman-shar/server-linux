@@ -96,6 +96,8 @@ private fun DashboardScreen() {
     var loadedModel by remember { mutableStateOf<String?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadMsg by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     val localIp = remember { getLocalIp() }
@@ -167,9 +169,35 @@ private fun DashboardScreen() {
                 InfoRow("LAN URL", lanUrl)
                 InfoRow("API Key", settings.apiKey)
 
-                statusMessage?.let {
+                statusMessage?.let { msg ->
                     Spacer(Modifier.height(8.dp))
-                    Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    Text(msg, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    
+                    if (msg.contains("missing") || msg.contains("not executable")) {
+                        Button(
+                            onClick = {
+                                isDownloading = true
+                                downloadMsg = "Starting..."
+                                engine.downloadEngine(
+                                    onProgress = { p -> scope.launch(Dispatchers.Main) { downloadMsg = p } },
+                                    onDone = { success, err ->
+                                        scope.launch(Dispatchers.Main) {
+                                            isDownloading = false
+                                            if (success) {
+                                                statusMessage = "Engine installed! Click Start Server."
+                                            } else {
+                                                statusMessage = "Download failed: $err"
+                                            }
+                                        }
+                                    }
+                                )
+                            },
+                            enabled = !isDownloading,
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                        ) {
+                            Text(if (isDownloading) downloadMsg else "⬇ Auto-Download Engine Now")
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(12.dp))
