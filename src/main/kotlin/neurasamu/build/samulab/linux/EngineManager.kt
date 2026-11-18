@@ -159,24 +159,29 @@ class EngineManager {
                 val proc = pb.start()
                 proc.waitFor()
 
-                onProgress("Setting up binary...")
-                val extractedDir = SettingsStore.appDir.toFile().listFiles()?.find { it.isDirectory && it.name.startsWith("llama-") }
-                val bin = extractedDir?.listFiles()?.find { it.name == "llama-server" }
+                onProgress("Setting up binary and libraries...")
+                val extractedDir = SettingsStore.appDir.toFile().walkTopDown().find { it.isDirectory && it.name.startsWith("llama-") }
+                    ?: throw Exception("Extracted folder not found")
                 
-                if (bin != null && bin.exists()) {
-                    val dest = SettingsStore.appDir.resolve("llama-server").toFile()
-                    if (dest.exists()) dest.delete()
-                    bin.copyTo(dest, overwrite = true)
-                    
-                    ProcessBuilder("chmod", "+x", dest.absolutePath).start().waitFor()
-                    
-                    tarFile.delete()
-                    extractedDir.deleteRecursively()
-                    
-                    onDone(true, null)
-                } else {
-                    throw Exception("llama-server binary not found in archive")
+                val bin = extractedDir.walkTopDown().find { it.name == "llama-server" }
+                    ?: throw Exception("llama-server binary not found in archive")
+                
+                val binDir = bin.parentFile
+                binDir.listFiles()?.forEach { file ->
+                    if (file.isFile) {
+                        val dest = SettingsStore.appDir.resolve(file.name).toFile()
+                        if (dest.exists()) dest.delete()
+                        file.copyTo(dest, overwrite = true)
+                    }
                 }
+                
+                val destBin = SettingsStore.appDir.resolve("llama-server").toFile()
+                ProcessBuilder("chmod", "+x", destBin.absolutePath).start().waitFor()
+                
+                tarFile.delete()
+                extractedDir.deleteRecursively()
+                
+                onDone(true, null)
             } catch (e: Exception) {
                 onDone(false, e.message ?: "Unknown error")
             }
