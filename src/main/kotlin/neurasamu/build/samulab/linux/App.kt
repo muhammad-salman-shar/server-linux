@@ -140,7 +140,7 @@ private fun SaMuLabRoot(
         ApiConfig(
             id = LOCAL_SAMU_API_ID,
             label = "SaMu Lab (Local)",
-            baseUrl = "[http://127.0.0.1](http://127.0.0.1):${serverSettings.port}/v1",
+            baseUrl = "http://127.0.0.1:${serverSettings.port}/v1",
             modelName = serverSettings.modelApiName,
             apiKey = if (serverSettings.requireAuth) serverSettings.apiKey else "",
             isBuiltInLocal = true

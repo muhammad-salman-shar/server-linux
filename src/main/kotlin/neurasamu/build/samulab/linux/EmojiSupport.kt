@@ -87,7 +87,7 @@ object EmojiSupport {
 
 fun sanitizeApiUrl(raw: String): String {
     var s = raw.trim()
-    // Heal accidental markdown link syntax like [http://127.0.0.1](http://127.0.0.1):8080/v1
+    // Heal accidental markdown link syntax like http://127.0.0.1:8080/v1
     val mdLink = Regex("""\[([^\]]+)\]\((https?://[^)]+)\)""")
     s = mdLink.replace(s) { m -> m.groupValues[2] }
     s = s.trim()
