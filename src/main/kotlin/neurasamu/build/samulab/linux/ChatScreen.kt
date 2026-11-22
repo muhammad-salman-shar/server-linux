@@ -14,7 +14,9 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -40,6 +42,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -49,17 +52,23 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
@@ -111,6 +120,13 @@ fun ChatScreen(
     activeApi: ApiConfig?,
     localServerRunning: Boolean,
     contextSize: Int,
+    supportsThinking: Boolean,
+    thinkingEnabled: Boolean,
+    thinkingEffort: ThinkingEffort,
+    chatMode: ChatMode,
+    onChatModeChange: (ChatMode) -> Unit,
+    onToggleThinking: () -> Unit,
+    onThinkingEffortChange: (ThinkingEffort) -> Unit,
     chats: List<ChatSession>,
     activeChat: ChatSession,
     inputText: String,
@@ -121,6 +137,12 @@ fun ChatScreen(
     isStreaming: Boolean,
     streamingText: String,
     speakingMsgId: String?,
+    audioPlayer: InAppAudioPlayer,
+    playingAudioPath: String?,
+    onToggleAudio: (String) -> Unit,
+    onDownloadMedia: (GeneratedMedia) -> Unit,
+    onShareMedia: (GeneratedMedia) -> Unit,
+    onRegenerateMedia: (GeneratedMedia) -> Unit,
     onSelectApi: (ApiConfig) -> Unit,
     onOpenAddApi: () -> Unit,
     onOpenEditApi: (ApiConfig) -> Unit,
@@ -230,6 +252,7 @@ fun ChatScreen(
 
                     val liveTokens = activeChat.estimatedTokens +
                         if (isStreaming && streamingText.isNotEmpty()) (streamingText.length / 4).coerceAtLeast(1) else 0
+                    val ctxLabel = if (contextSize <= 0) "$liveTokens / Max" else "$liveTokens/$contextSize"
 
                     Box(
                         modifier = Modifier
@@ -240,7 +263,7 @@ fun ChatScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "$liveTokens/$contextSize",
+                            text = ctxLabel,
                             fontSize = (11f * scale).sp,
                             fontWeight = FontWeight.Medium,
                             color = palette.primary
@@ -273,7 +296,7 @@ fun ChatScreen(
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
-                // Message List
+                // Message List with Vertical Scrollbar Slider
                 val listState = rememberLazyListState()
                 val isNearBottom by remember {
                     derivedStateOf {
@@ -304,7 +327,7 @@ fun ChatScreen(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "Ready to chat",
+                                text = "Ready to create & chat",
                                 fontSize = (16f * scale).sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = palette.onSurface
@@ -312,9 +335,12 @@ fun ChatScreen(
                             Spacer(Modifier.height(8.dp))
                             val emptySub = when {
                                 activeApi == null -> "Add an API using + API in the sidebar first."
+                                chatMode == ChatMode.IMAGE -> "Describe an image below to generate it locally or via API."
+                                chatMode == ChatMode.AUDIO -> "Type text below to synthesize natural speech audio."
+                                chatMode == ChatMode.VIDEO -> "Describe a video scene below to generate a clip."
                                 activeApi.isBuiltInLocal && !localServerRunning ->
-                                    "Your local SaMu Lab server is currently stopped. Start it in the Server tab or pick another API."
-                                else -> "Type below to send your first message."
+                                    "Your local SaMu Lab server is currently stopped. Start it in the Server tab or switch to Image/Audio/Video mode."
+                                else -> "Attach PDFs, Docs, Code, Images, Audio or just type below."
                             }
                             Text(
                                 text = emptySub,
@@ -322,9 +348,9 @@ fun ChatScreen(
                                 color = palette.textSecondary,
                                 textAlign = TextAlign.Center,
                                 lineHeight = (13f * scale * 1.5f).sp,
-                                modifier = Modifier.widthIn(max = 320.dp)
+                                modifier = Modifier.widthIn(max = 360.dp)
                             )
-                            if (activeApi?.isBuiltInLocal == true && !localServerRunning) {
+                            if (chatMode == ChatMode.CHAT && activeApi?.isBuiltInLocal == true && !localServerRunning) {
                                 Spacer(Modifier.height(14.dp))
                                 Button(
                                     onClick = onSwitchToServerTab,
@@ -338,7 +364,7 @@ fun ChatScreen(
                     } else {
                         LazyColumn(
                             state = listState,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().padding(end = 12.dp),
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
@@ -346,6 +372,12 @@ fun ChatScreen(
                                 MessageBubbleItem(
                                     message = msg,
                                     isSpeaking = speakingMsgId == msg.id,
+                                    audioPlayer = audioPlayer,
+                                    playingAudioPath = playingAudioPath,
+                                    onToggleAudio = onToggleAudio,
+                                    onDownloadMedia = onDownloadMedia,
+                                    onShareMedia = onShareMedia,
+                                    onRegenerateMedia = onRegenerateMedia,
                                     onSelectText = { onSelectTextMessage(msg) },
                                     onCopy = {
                                         if (copyToClipboard(msg.content)) onCopyToast("Copied!")
@@ -373,11 +405,21 @@ fun ChatScreen(
                             }
                         }
 
+                        // Draggable Vertical Scrollbar Slider for Chat History
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(listState),
+                            style = samuScrollbarStyle(),
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .fillMaxHeight()
+                                .padding(end = 3.dp, top = 4.dp, bottom = 4.dp)
+                        )
+
                         if (!isNearBottom && (activeChat.messages.isNotEmpty() || isStreaming)) {
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
-                                    .padding(16.dp)
+                                    .padding(end = 22.dp, bottom = 16.dp)
                                     .size(40.dp)
                                     .clip(CircleShape)
                                     .background(palette.primary)
@@ -408,15 +450,30 @@ fun ChatScreen(
                     onTextChange = onInputChange,
                     attachments = attachments,
                     isStreaming = isStreaming,
+                    chatMode = chatMode,
+                    onChatModeChange = onChatModeChange,
+                    supportsThinking = supportsThinking && chatMode == ChatMode.CHAT,
+                    thinkingEnabled = thinkingEnabled,
+                    thinkingEffort = thinkingEffort,
+                    onToggleThinking = onToggleThinking,
+                    onThinkingEffortChange = onThinkingEffortChange,
                     onPickFile = {
-                        openFilePicker("Attach File")?.let { f ->
-                            val isImg = f.extension.lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif")
-                            onAddAttachment(ChatAttachment(f.absolutePath, f.name, isImg, f.length()))
+                        openFilePicker("Attach Any File (PDF, Doc, MD, Code, Audio, Image)")?.let { f ->
+                            val kind = FileAnalyzer.classify(f)
+                            onAddAttachment(
+                                ChatAttachment(
+                                    path = f.absolutePath,
+                                    name = f.name,
+                                    isImage = kind == AttachmentKind.IMAGE,
+                                    sizeBytes = f.length(),
+                                    kind = kind.name.lowercase()
+                                )
+                            )
                         }
                     },
                     onPickImage = {
-                        openFilePicker("Attach Image", setOf(".png", ".jpg", ".jpeg", ".webp", ".gif"))?.let { f ->
-                            onAddAttachment(ChatAttachment(f.absolutePath, f.name, true, f.length()))
+                        openFilePicker("Attach Image", setOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"))?.let { f ->
+                            onAddAttachment(ChatAttachment(f.absolutePath, f.name, true, f.length(), "image"))
                         }
                     },
                     onRemoveAttachment = onRemoveAttachment,
@@ -489,6 +546,7 @@ private fun ChatSidebar(
 ) {
     val palette = LocalSaMuColors.current
     val scale = LocalFontScale.current
+    val sidebarScroll = rememberScrollState()
 
     Row(modifier = Modifier.width(280.dp).fillMaxHeight()) {
         Column(
@@ -539,38 +597,123 @@ private fun ChatSidebar(
 
             Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    text = "APIS",
-                    fontSize = (10f * scale).sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.5.sp,
-                    color = palette.textSecondary,
-                    modifier = Modifier.padding(start = 6.dp, bottom = 8.dp, top = 4.dp)
-                )
-
-                if (allApis.isEmpty()) {
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(sidebarScroll)
+                        .padding(start = 8.dp, end = 14.dp, top = 8.dp, bottom = 12.dp)
+                ) {
                     Text(
-                        text = "No APIs yet. Tap + API to add one.",
-                        fontSize = (12f * scale).sp,
+                        text = "APIS",
+                        fontSize = (10f * scale).sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.5.sp,
                         color = palette.textSecondary,
-                        modifier = Modifier.padding(8.dp)
+                        modifier = Modifier.padding(start = 6.dp, bottom = 8.dp, top = 4.dp)
                     )
-                } else {
-                    allApis.forEach { api ->
-                        val active = api.id == activeApiId
+
+                    if (allApis.isEmpty()) {
+                        Text(
+                            text = "No APIs yet. Tap + API to add one.",
+                            fontSize = (12f * scale).sp,
+                            color = palette.textSecondary,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    } else {
+                        allApis.forEach { api ->
+                            val active = api.id == activeApiId
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 4.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (active) palette.surfaceVariant else Color.Transparent)
+                                    .clickable { onSelectApi(api) },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (active) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(3.dp)
+                                            .height(44.dp)
+                                            .background(palette.primary)
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(horizontal = 10.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            if (api.isBuiltInLocal) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(7.dp)
+                                                        .background(
+                                                            if (localServerRunning) palette.success else palette.textTertiary,
+                                                            CircleShape
+                                                        )
+                                                )
+                                            }
+                                            Text(
+                                                text = api.label,
+                                                fontSize = (13f * scale).sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = palette.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Text(
+                                            text = if (api.isBuiltInLocal) {
+                                                "${api.modelName} · ${if (localServerRunning) "Online" else "Stopped"}"
+                                            } else api.modelName,
+                                            fontSize = (11f * scale).sp,
+                                            color = palette.textSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.padding(top = 2.dp)
+                                        )
+                                    }
+
+                                    if (!api.isBuiltInLocal) {
+                                        IconButton(onClick = { onEditApi(api) }, modifier = Modifier.size(26.dp)) {
+                                            Icon(Icons.Filled.Edit, contentDescription = "Edit API", tint = palette.textTertiary, modifier = Modifier.size(15.dp))
+                                        }
+                                        IconButton(onClick = { onDeleteApi(api) }, modifier = Modifier.size(26.dp)) {
+                                            Icon(Icons.Filled.Close, contentDescription = "Delete API", tint = palette.textTertiary, modifier = Modifier.size(15.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    Text(
+                        text = "CHATS",
+                        fontSize = (10f * scale).sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.5.sp,
+                        color = palette.textSecondary,
+                        modifier = Modifier.padding(start = 6.dp, bottom = 8.dp)
+                    )
+
+                    chats.forEach { chat ->
+                        val active = chat.id == activeChatId
+                        var menuOpen by remember(chat.id) { mutableStateOf(false) }
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(bottom = 4.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(if (active) palette.surfaceVariant else Color.Transparent)
-                                .clickable { onSelectApi(api) },
+                                .clickable { onSelectChat(chat) },
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             if (active) {
@@ -584,48 +727,61 @@ private fun ChatSidebar(
                             Row(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .padding(horizontal = 10.dp, vertical = 9.dp),
+                                    .padding(start = 10.dp, end = 4.dp, top = 9.dp, bottom = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        if (api.isBuiltInLocal) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(7.dp)
-                                                    .background(
-                                                        if (localServerRunning) palette.success else palette.textTertiary,
-                                                        CircleShape
-                                                    )
-                                            )
-                                        }
-                                        Text(
-                                            text = api.label,
-                                            fontSize = (13f * scale).sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = palette.onSurface,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
                                     Text(
-                                        text = if (api.isBuiltInLocal) {
-                                            "${api.modelName} · ${if (localServerRunning) "Online" else "Stopped"}"
-                                        } else api.modelName,
+                                        text = EmojiSupport.format(chat.title),
+                                        fontSize = (13f * scale).sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = palette.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${chat.messages.size} messages",
                                         fontSize = (11f * scale).sp,
                                         color = palette.textSecondary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.padding(top = 2.dp)
                                     )
                                 }
 
-                                if (!api.isBuiltInLocal) {
-                                    IconButton(onClick = { onEditApi(api) }, modifier = Modifier.size(26.dp)) {
-                                        Icon(Icons.Filled.Edit, contentDescription = "Edit API", tint = palette.textTertiary, modifier = Modifier.size(15.dp))
+                                Box {
+                                    IconButton(
+                                        onClick = { menuOpen = true },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.MoreVert,
+                                            contentDescription = "Chat Options",
+                                            tint = palette.textTertiary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
                                     }
-                                    IconButton(onClick = { onDeleteApi(api) }, modifier = Modifier.size(26.dp)) {
-                                        Icon(Icons.Filled.Close, contentDescription = "Delete API", tint = palette.textTertiary, modifier = Modifier.size(15.dp))
+                                    DropdownMenu(
+                                        expanded = menuOpen,
+                                        onDismissRequest = { menuOpen = false },
+                                        modifier = Modifier
+                                            .widthIn(min = 165.dp)
+                                            .background(palette.surface, RoundedCornerShape(8.dp))
+                                            .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Rename", fontSize = 13.sp, color = palette.onSurface) },
+                                            leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null, tint = palette.textSecondary, modifier = Modifier.size(16.dp)) },
+                                            onClick = { menuOpen = false; onRenameChat(chat) }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Download as TXT", fontSize = 13.sp, color = palette.onSurface) },
+                                            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null, tint = palette.textSecondary, modifier = Modifier.size(16.dp)) },
+                                            onClick = { menuOpen = false; onDownloadChat(chat) }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Delete", fontSize = 13.sp, color = palette.error) },
+                                            leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = palette.error, modifier = Modifier.size(16.dp)) },
+                                            onClick = { menuOpen = false; onDeleteChat(chat) }
+                                        )
                                     }
                                 }
                             }
@@ -633,119 +789,36 @@ private fun ChatSidebar(
                     }
                 }
 
-                Spacer(Modifier.height(12.dp))
-
-                Text(
-                    text = "CHATS",
-                    fontSize = (10f * scale).sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.5.sp,
-                    color = palette.textSecondary,
-                    modifier = Modifier.padding(start = 6.dp, bottom = 8.dp)
+                // Vertical Scrollbar Slider for Sidebar History
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(sidebarScroll),
+                    style = samuScrollbarStyle(),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp, top = 4.dp, bottom = 4.dp)
                 )
-
-                chats.forEach { chat ->
-                    val active = chat.id == activeChatId
-                    var menuOpen by remember(chat.id) { mutableStateOf(false) }
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 4.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (active) palette.surfaceVariant else Color.Transparent)
-                            .clickable { onSelectChat(chat) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (active) {
-                            Box(
-                                modifier = Modifier
-                                    .width(3.dp)
-                                    .height(44.dp)
-                                    .background(palette.primary)
-                            )
-                        }
-                        Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(start = 10.dp, end = 4.dp, top = 9.dp, bottom = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = EmojiSupport.format(chat.title),
-                                    fontSize = (13f * scale).sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = palette.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "${chat.messages.size} messages",
-                                    fontSize = (11f * scale).sp,
-                                    color = palette.textSecondary,
-                                    modifier = Modifier.padding(top = 2.dp)
-                                )
-                            }
-
-                            Box {
-                                IconButton(
-                                    onClick = { menuOpen = true },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Filled.MoreVert,
-                                        contentDescription = "Chat Options",
-                                        tint = palette.textTertiary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                                DropdownMenu(
-                                    expanded = menuOpen,
-                                    onDismissRequest = { menuOpen = false },
-                                    modifier = Modifier
-                                        .widthIn(min = 165.dp)
-                                        .background(palette.surface, RoundedCornerShape(8.dp))
-                                        .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("Rename", fontSize = 13.sp, color = palette.onSurface) },
-                                        leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null, tint = palette.textSecondary, modifier = Modifier.size(16.dp)) },
-                                        onClick = { menuOpen = false; onRenameChat(chat) }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Download as TXT", fontSize = 13.sp, color = palette.onSurface) },
-                                        leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null, tint = palette.textSecondary, modifier = Modifier.size(16.dp)) },
-                                        onClick = { menuOpen = false; onDownloadChat(chat) }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Delete", fontSize = 13.sp, color = palette.error) },
-                                        leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = palette.error, modifier = Modifier.size(16.dp)) },
-                                        onClick = { menuOpen = false; onDeleteChat(chat) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
         Box(Modifier.width(1.dp).fillMaxHeight().background(palette.divider))
     }
 }
 
-private fun extractThinking(raw: String): Pair<String?, String> {
+private data class ParsedThinking(
+    val thinking: String?,
+    val isStillThinking: Boolean,
+    val mainText: String
+)
+
+private fun extractThinking(raw: String): ParsedThinking {
     val startIdx = raw.indexOf("<think>")
-    if (startIdx < 0) return null to raw
+    if (startIdx < 0) return ParsedThinking(null, false, raw)
     val endIdx = raw.indexOf("</think>", startIdx + 7)
     return if (endIdx >= 0) {
         val think = raw.substring(startIdx + 7, endIdx).trim()
         val main = (raw.substring(0, startIdx) + raw.substring(endIdx + 8)).trim()
-        think to main
+        ParsedThinking(think, false, main)
     } else {
         val think = raw.substring(startIdx + 7).trim()
         val main = raw.substring(0, startIdx).trim()
-        think to main
+        ParsedThinking(think, true, main)
     }
 }
 
@@ -753,6 +826,12 @@ private fun extractThinking(raw: String): Pair<String?, String> {
 private fun MessageBubbleItem(
     message: ChatMessage,
     isSpeaking: Boolean,
+    audioPlayer: InAppAudioPlayer,
+    playingAudioPath: String?,
+    onToggleAudio: (String) -> Unit,
+    onDownloadMedia: (GeneratedMedia) -> Unit,
+    onShareMedia: (GeneratedMedia) -> Unit,
+    onRegenerateMedia: (GeneratedMedia) -> Unit,
     onSelectText: () -> Unit,
     onCopy: () -> Unit,
     onShare: () -> Unit,
@@ -827,42 +906,64 @@ private fun MessageBubbleItem(
                             }
                         }
                     } else {
-                        AssistantMessageBody(content = message.content, onCopyCode = onCopyCode)
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (message.content.isNotBlank()) {
+                                AssistantMessageBody(
+                                    content = message.content,
+                                    isStreaming = false,
+                                    onCopyCode = onCopyCode
+                                )
+                            }
+                            message.media.forEach { med ->
+                                GeneratedMediaCard(
+                                    media = med,
+                                    audioPlayer = audioPlayer,
+                                    playingAudioPath = playingAudioPath,
+                                    onToggleAudio = onToggleAudio,
+                                    onOpenImageLightbox = onOpenLightbox,
+                                    onDownload = onDownloadMedia,
+                                    onShare = onShareMedia,
+                                    onRegenerate = onRegenerateMedia
+                                )
+                            }
+                        }
                     }
                 }
 
-                // Clean Icon-Only Action Bar (Select Text, Copy, Share, Edit / Regenerate / Read Aloud)
+                // Clean Icon-Only Action Bar
                 if (!message.isError) {
                     Row(
                         modifier = Modifier.padding(top = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        MessageActionIcon(
-                            icon = Icons.Filled.SelectAll,
-                            description = "Select Text",
-                            tint = palette.textSecondary,
-                            onClick = onSelectText
-                        )
-                        MessageActionIcon(
-                            icon = if (copied) Icons.Filled.Check else Icons.Filled.ContentCopy,
-                            description = if (copied) "Copied" else "Copy",
-                            tint = if (copied) palette.success else palette.textSecondary,
-                            onClick = {
-                                onCopy()
-                                copied = true
-                                scope.launch {
-                                    delay(1500)
-                                    copied = false
+                        if (message.content.isNotBlank()) {
+                            MessageActionIcon(
+                                icon = Icons.Filled.SelectAll,
+                                description = "Select Text",
+                                tint = palette.textSecondary,
+                                onClick = onSelectText
+                            )
+                            MessageActionIcon(
+                                icon = if (copied) Icons.Filled.Check else Icons.Filled.ContentCopy,
+                                description = if (copied) "Copied" else "Copy",
+                                tint = if (copied) palette.success else palette.textSecondary,
+                                onClick = {
+                                    onCopy()
+                                    copied = true
+                                    scope.launch {
+                                        delay(1500)
+                                        copied = false
+                                    }
                                 }
-                            }
-                        )
-                        MessageActionIcon(
-                            icon = Icons.Filled.Share,
-                            description = "Share",
-                            tint = palette.textSecondary,
-                            onClick = onShare
-                        )
+                            )
+                            MessageActionIcon(
+                                icon = Icons.Filled.Share,
+                                description = "Share",
+                                tint = palette.textSecondary,
+                                onClick = onShare
+                            )
+                        }
                         if (isUser) {
                             MessageActionIcon(
                                 icon = Icons.Filled.Edit,
@@ -877,12 +978,14 @@ private fun MessageBubbleItem(
                                 tint = palette.textSecondary,
                                 onClick = onRegenerate
                             )
-                            MessageActionIcon(
-                                icon = if (isSpeaking) Icons.Filled.Stop else Icons.Filled.VolumeUp,
-                                description = if (isSpeaking) "Stop Reading" else "Read Aloud",
-                                tint = if (isSpeaking) palette.primary else palette.textSecondary,
-                                onClick = onReadAloud
-                            )
+                            if (message.content.isNotBlank()) {
+                                MessageActionIcon(
+                                    icon = if (isSpeaking) Icons.Filled.Stop else Icons.Filled.VolumeUp,
+                                    description = if (isSpeaking) "Stop Reading" else "Read Aloud",
+                                    tint = if (isSpeaking) palette.primary else palette.textSecondary,
+                                    onClick = onReadAloud
+                                )
+                            }
                         }
                     }
                 }
@@ -931,37 +1034,54 @@ private fun UserMessageBody(
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (message.attachments.isNotEmpty()) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.horizontalScroll(rememberScrollState())
-            ) {
-                message.attachments.forEach { att ->
-                    if (att.isImage) {
-                        val bmp = remember(att.path) { loadImageBitmapSafe(att.path) }
-                        if (bmp != null) {
-                            Image(
-                                bitmap = bmp,
-                                contentDescription = att.name,
-                                contentScale = ContentScale.Crop,
+            val attScroll = rememberScrollState()
+            Column {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(attScroll)
+                ) {
+                    message.attachments.forEach { att ->
+                        if (att.isImage) {
+                            val bmp = remember(att.path) { loadImageBitmapSafe(att.path) }
+                            if (bmp != null) {
+                                Image(
+                                    bitmap = bmp,
+                                    contentDescription = att.name,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { onOpenLightbox(att) }
+                                )
+                            }
+                        } else {
+                            val icon = when (att.kind.lowercase()) {
+                                "pdf", "document" -> Icons.Filled.Description
+                                "audio" -> Icons.Filled.Audiotrack
+                                "video" -> Icons.Filled.Movie
+                                "code_text" -> Icons.Filled.Code
+                                else -> Icons.Filled.AttachFile
+                            }
+                            Row(
                                 modifier = Modifier
-                                    .size(72.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { onOpenLightbox(att) }
-                            )
-                        }
-                    } else {
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(palette.surfaceVariant)
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(Icons.Filled.AttachFile, contentDescription = null, tint = palette.primary, modifier = Modifier.size(14.dp))
-                            Text(att.name, fontSize = 11.sp, color = palette.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(palette.surfaceVariant)
+                                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(icon, contentDescription = null, tint = palette.primary, modifier = Modifier.size(14.dp))
+                                Text(att.name, fontSize = 11.sp, color = palette.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                         }
                     }
+                }
+                if (attScroll.maxValue > 0) {
+                    HorizontalScrollbar(
+                        adapter = rememberScrollbarAdapter(attScroll),
+                        style = samuScrollbarStyle(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 3.dp)
+                    )
                 }
             }
         }
@@ -991,26 +1111,58 @@ private fun UserMessageBody(
 @Composable
 private fun AssistantMessageBody(
     content: String,
+    isStreaming: Boolean,
     onCopyCode: (String) -> Unit
 ) {
     val palette = LocalSaMuColors.current
     val scale = LocalFontScale.current
-    val (thinking, mainText) = remember(content) { extractThinking(content) }
-    var thinkExpanded by remember { mutableStateOf(false) }
+    val parsed = remember(content) { extractThinking(content) }
+    val thinking = parsed.thinking
+    val isStillThinking = parsed.isStillThinking
+    val mainText = parsed.mainText
+
+    // Auto-expand while live thinking is streaming (unless user hides it); auto-collapse once thinking finishes!
+    var thinkExpanded by remember { mutableStateOf(isStreaming && isStillThinking) }
+    var userToggledDuringThink by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isStreaming, isStillThinking) {
+        if (isStreaming && isStillThinking && !userToggledDuringThink) {
+            thinkExpanded = true
+        } else if (!isStillThinking) {
+            // Automatically hide thinking once model moves to final answer or finishes!
+            thinkExpanded = false
+            userToggledDuringThink = false
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (!thinking.isNullOrBlank()) {
+            val thinkScroll = rememberScrollState()
             Column {
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .clickable { thinkExpanded = !thinkExpanded }
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                        .background(palette.surfaceVariant.copy(alpha = 0.45f))
+                        .clickable {
+                            thinkExpanded = !thinkExpanded
+                            if (isStreaming && isStillThinking) userToggledDuringThink = true
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
+                    Icon(
+                        Icons.Filled.Psychology,
+                        contentDescription = null,
+                        tint = palette.primary,
+                        modifier = Modifier.size(14.dp)
+                    )
                     Text(
-                        text = "Thinking",
+                        text = when {
+                            isStreaming && isStillThinking -> if (thinkExpanded) "Thinking... (Hide)" else "Thinking... (Show)"
+                            thinkExpanded -> "Hide Thinking"
+                            else -> "Show Thinking"
+                        },
                         fontSize = (11f * scale).sp,
                         fontWeight = FontWeight.Medium,
                         color = palette.primary
@@ -1022,21 +1174,37 @@ private fun AssistantMessageBody(
                         modifier = Modifier.size(14.dp)
                     )
                 }
+
                 if (thinkExpanded) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 4.dp, bottom = 6.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(palette.surfaceVariant.copy(alpha = 0.4f))
-                            .padding(8.dp)
+                            .heightIn(max = 220.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(palette.surfaceVariant.copy(alpha = 0.35f))
+                            .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
                     ) {
-                        Text(
-                            text = EmojiSupport.format(thinking),
-                            fontSize = (10f * scale).sp,
-                            lineHeight = (13f * scale).sp,
-                            color = palette.textSecondary
-                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(thinkScroll)
+                                .padding(start = 10.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)
+                        ) {
+                            Text(
+                                text = EmojiSupport.format(thinking),
+                                fontSize = (10.5f * scale).sp,
+                                lineHeight = (14.5f * scale).sp,
+                                color = palette.textSecondary
+                            )
+                        }
+                        if (thinkScroll.maxValue > 0) {
+                            VerticalScrollbar(
+                                adapter = rememberScrollbarAdapter(thinkScroll),
+                                style = samuScrollbarStyle(),
+                                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(2.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -1070,7 +1238,7 @@ private fun StreamingBubbleItem(
                 if (text.isBlank()) {
                     ThinkingDots()
                 } else {
-                    AssistantMessageBody(content = text, onCopyCode = onCopyCode)
+                    AssistantMessageBody(content = text, isStreaming = true, onCopyCode = onCopyCode)
                 }
             }
         }
@@ -1112,6 +1280,13 @@ private fun ChatInputBar(
     onTextChange: (String) -> Unit,
     attachments: List<ChatAttachment>,
     isStreaming: Boolean,
+    chatMode: ChatMode,
+    onChatModeChange: (ChatMode) -> Unit,
+    supportsThinking: Boolean,
+    thinkingEnabled: Boolean,
+    thinkingEffort: ThinkingEffort,
+    onToggleThinking: () -> Unit,
+    onThinkingEffortChange: (ThinkingEffort) -> Unit,
     onPickFile: () -> Unit,
     onPickImage: () -> Unit,
     onRemoveAttachment: (ChatAttachment) -> Unit,
@@ -1122,19 +1297,109 @@ private fun ChatInputBar(
     val palette = LocalSaMuColors.current
     val scale = LocalFontScale.current
     val canSend = (text.isNotBlank() || attachments.isNotEmpty()) && !isStreaming
+    val toolbarScroll = rememberScrollState()
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(palette.surface)
-            .padding(horizontal = 10.dp, vertical = 10.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
+        // Mode Switcher (Chat | Image | Audio | Video) + Auto-Detected Thinking Control
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(toolbarScroll),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val modes = listOf(
+                ChatMode.CHAT to Icons.Filled.Forum,
+                ChatMode.IMAGE to Icons.Filled.Image,
+                ChatMode.AUDIO to Icons.Filled.Audiotrack,
+                ChatMode.VIDEO to Icons.Filled.Movie
+            )
+            modes.forEach { (mode, icon) ->
+                val active = chatMode == mode
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (active) palette.primary.copy(alpha = 0.18f) else palette.background)
+                        .border(1.dp, if (active) palette.primary else palette.divider, RoundedCornerShape(16.dp))
+                        .clickable { onChatModeChange(mode) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(icon, contentDescription = mode.label, tint = if (active) palette.primary else palette.textSecondary, modifier = Modifier.size(13.dp))
+                    Text(
+                        mode.label,
+                        fontSize = 11.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (active) palette.primary else palette.textSecondary
+                    )
+                }
+            }
+
+            // ONLY visible when the active model actually supports Thinking!
+            if (supportsThinking) {
+                Box(Modifier.width(1.dp).height(18.dp).background(palette.divider))
+
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (thinkingEnabled) palette.primary.copy(alpha = 0.2f) else palette.background)
+                        .border(1.dp, if (thinkingEnabled) palette.primary else palette.divider, RoundedCornerShape(16.dp))
+                        .clickable(onClick = onToggleThinking)
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Psychology,
+                        contentDescription = "Toggle Thinking",
+                        tint = if (thinkingEnabled) palette.primary else palette.textTertiary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = if (thinkingEnabled) "Think: ON" else "Think: OFF",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (thinkingEnabled) palette.primary else palette.textSecondary
+                    )
+                }
+
+                if (thinkingEnabled) {
+                    listOf(ThinkingEffort.LOW, ThinkingEffort.HIGH, ThinkingEffort.MAX).forEach { eff ->
+                        val active = thinkingEffort == eff
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (active) palette.primary else palette.background)
+                                .border(1.dp, if (active) palette.primary else palette.divider, RoundedCornerShape(12.dp))
+                                .clickable { onThinkingEffortChange(eff) }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                eff.label,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (active) Color.White else palette.textSecondary
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         if (attachments.isNotEmpty()) {
+            val attScroll = rememberScrollState()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(bottom = 8.dp),
+                    .horizontalScroll(attScroll)
+                    .padding(bottom = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 attachments.forEach { att ->
@@ -1153,6 +1418,13 @@ private fun ChatInputBar(
                                 )
                             }
                         } else {
+                            val icon = when (att.kind.lowercase()) {
+                                "pdf", "document" -> Icons.Filled.Description
+                                "audio" -> Icons.Filled.Audiotrack
+                                "video" -> Icons.Filled.Movie
+                                "code_text" -> Icons.Filled.Code
+                                else -> Icons.Filled.AttachFile
+                            }
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -1162,7 +1434,7 @@ private fun ChatInputBar(
                                 verticalArrangement = Arrangement.Center,
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Icon(Icons.Filled.AttachFile, contentDescription = null, tint = palette.primary, modifier = Modifier.size(20.dp))
+                                Icon(icon, contentDescription = null, tint = palette.primary, modifier = Modifier.size(20.dp))
                                 Text(
                                     att.name,
                                     fontSize = 9.sp,
@@ -1194,11 +1466,13 @@ private fun ChatInputBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.Bottom
         ) {
-            IconButton(onClick = onPickFile, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Filled.AttachFile, contentDescription = "Attach file", tint = palette.primary, modifier = Modifier.size(20.dp))
-            }
-            IconButton(onClick = onPickImage, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Filled.Image, contentDescription = "Attach image", tint = palette.primary, modifier = Modifier.size(20.dp))
+            if (chatMode == ChatMode.CHAT) {
+                IconButton(onClick = onPickFile, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = "Attach file", tint = palette.primary, modifier = Modifier.size(20.dp))
+                }
+                IconButton(onClick = onPickImage, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.Image, contentDescription = "Attach image", tint = palette.primary, modifier = Modifier.size(20.dp))
+                }
             }
 
             Box(
@@ -1212,10 +1486,18 @@ private fun ChatInputBar(
                 contentAlignment = Alignment.CenterStart
             ) {
                 if (text.isEmpty()) {
+                    val hint = when (chatMode) {
+                        ChatMode.CHAT -> "Ask anything or attach PDF, code, image, audio..."
+                        ChatMode.IMAGE -> "Describe the image to generate..."
+                        ChatMode.AUDIO -> "Type text to convert to speech audio..."
+                        ChatMode.VIDEO -> "Describe the video clip to generate..."
+                    }
                     Text(
-                        text = "Ask anything...",
+                        text = hint,
                         fontSize = (14f * scale).sp,
-                        color = palette.textSecondary
+                        color = palette.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
                 BasicTextField(

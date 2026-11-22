@@ -1,5 +1,6 @@
 package neurasamu.build.samulab.linux
 
+import java.awt.Desktop
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
@@ -9,6 +10,10 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import javax.sound.sampled.AudioSystem
+import javax.sound.sampled.Clip
+import javax.sound.sampled.LineEvent
 
 fun getLocalIp(): String {
     return runCatching {
@@ -70,13 +75,45 @@ fun saveTextFileDialog(defaultFilename: String, content: String): File? {
     }.getOrNull()
 }
 
+fun saveBinaryFileDialog(title: String, defaultFilename: String, sourceFile: File): File? {
+    if (!sourceFile.exists()) return null
+    return runCatching {
+        val dialog = FileDialog(null as Frame?, title, FileDialog.SAVE)
+        dialog.file = defaultFilename
+        val downloads = File(System.getProperty("user.home"), "Downloads")
+        if (downloads.exists()) dialog.directory = downloads.absolutePath
+        dialog.isVisible = true
+        val dir = dialog.directory
+        val file = dialog.file
+        if (dir != null && file != null) {
+            val out = File(dir, file)
+            Files.copy(sourceFile.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            out
+        } else null
+    }.getOrNull()
+}
+
+fun openFileExternally(file: File): Boolean {
+    if (!file.exists()) return false
+    val launched = runCatching {
+        ProcessBuilder("xdg-open", file.absolutePath).start()
+        true
+    }.getOrDefault(false)
+    if (launched) return true
+    return runCatching {
+        if (Desktop.isDesktopSupported()) {
+            Desktop.getDesktop().open(file)
+            true
+        } else false
+    }.getOrDefault(false)
+}
+
 fun createLinuxDesktopShortcut(): Pair<Boolean, String> {
     return runCatching {
         val home = System.getProperty("user.home")
         val desktopDir = Path.of(home, "Desktop").toFile()
         if (!desktopDir.exists()) desktopDir.mkdirs()
 
-        // Save icon in ~/.local/share/samu-lab/icon.png so shortcut always has the exact icon
         SettingsStore.ensureDirs()
         val iconDest = SettingsStore.appDir.resolve("icon.png").toFile()
         Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")?.use { input ->
@@ -99,7 +136,7 @@ fun createLinuxDesktopShortcut(): Pair<Boolean, String> {
             Version=1.0
             Type=Application
             Name=SaMu Lab
-            Comment=Local AI Chat & OpenAI-Compatible Server
+            Comment=Universal Local AI Studio (Chat, Vision, Image, Audio & Video)
             Exec=$execPath
             Icon=$iconPath
             Terminal=false
@@ -111,7 +148,6 @@ fun createLinuxDesktopShortcut(): Pair<Boolean, String> {
         shortcut.writeText(desktopContent)
         shortcut.setExecutable(true, false)
         runCatching { ProcessBuilder("chmod", "+x", shortcut.absolutePath).start().waitFor() }
-        // Mark trusted on GNOME/XFCE desktops if gio is available
         runCatching {
             ProcessBuilder("gio", "set", shortcut.absolutePath, "metadata::trusted", "true")
                 .start().waitFor()
@@ -172,5 +208,102 @@ class LinuxTtsPlayer {
             if (started) return null
         }
         return "No TTS engine found (install espeak-ng or speech-dispatcher)."
+    }
+}
+
+class InAppAudioPlayer {
+    @Volatile private var clip: Clip? = null
+    @Volatile private var extProc: Process? = null
+    @Volatile var playingPath: String? = null
+        private set
+
+    fun stop() {
+        playingPath = null
+        runCatching { clip?.stop() }
+        runCatching { clip?.close() }
+        clip = null
+        runCatching { extProc?.destroyForcibly() }
+        extProc = null
+    }
+
+    fun progressFraction(): Float {
+        val c = clip ?: return 0f
+        val len = c.microsecondLength
+        if (len <= 0L) return 0f
+        return (c.microsecondPosition.toFloat() / len.toFloat()).coerceIn(0f, 1f)
+    }
+
+    fun durationSeconds(): Double {
+        val c = clip ?: return 0.0
+        return (c.microsecondLength / 1_000_000.0).coerceAtLeast(0.0)
+    }
+
+    fun positionSeconds(): Double {
+        val c = clip ?: return 0.0
+        return (c.microsecondPosition / 1_000_000.0).coerceAtLeast(0.0)
+    }
+
+    fun seek(fraction: Float) {
+        val c = clip ?: return
+        val len = c.microsecondLength
+        if (len > 0L) {
+            c.microsecondPosition = (len * fraction.coerceIn(0f, 1f)).toLong()
+        }
+    }
+
+    fun toggle(path: String, onFinished: () -> Unit): String? {
+        if (playingPath == path) {
+            stop()
+            onFinished()
+            return null
+        }
+        stop()
+        val file = File(path)
+        if (!file.exists()) return "Audio file not found."
+
+        // Try native JVM audio playback first (works natively for WAV/AIFF/AU)
+        val nativeOk = runCatching {
+            val ais = AudioSystem.getAudioInputStream(file)
+            val c = AudioSystem.getClip()
+            c.open(ais)
+            c.addLineListener { ev ->
+                if (ev.type == LineEvent.Type.STOP) {
+                    if (playingPath == path && c.microsecondPosition >= c.microsecondLength - 50_000) {
+                        stop()
+                        onFinished()
+                    }
+                }
+            }
+            clip = c
+            playingPath = path
+            c.start()
+            true
+        }.getOrDefault(false)
+        if (nativeOk) return null
+
+        // Fallback to Linux audio CLI players (handles mp3/ogg/flac/m4a)
+        val cmds = listOf(
+            listOf("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file.absolutePath),
+            listOf("paplay", file.absolutePath),
+            listOf("aplay", file.absolutePath)
+        )
+        for (cmd in cmds) {
+            val started = runCatching {
+                val p = ProcessBuilder(cmd).start()
+                extProc = p
+                playingPath = path
+                Thread {
+                    runCatching { p.waitFor() }
+                    if (extProc === p) {
+                        extProc = null
+                        playingPath = null
+                        onFinished()
+                    }
+                }.apply { isDaemon = true }.start()
+                true
+            }.getOrDefault(false)
+            if (started) return null
+        }
+        return "Install ffmpeg or pulseaudio-utils to play this audio format."
     }
 }

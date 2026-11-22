@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "neurasamu.build.samulab.linux"
-version = "1.0.0"
+version = "1.1.0"
 
 kotlin {
     jvmToolchain(17)
@@ -19,6 +19,7 @@ dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.json:json:20240303")
+    implementation("org.apache.pdfbox:pdfbox:3.0.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
 }
@@ -33,8 +34,8 @@ compose.desktop {
             includeAllModules = true
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
             packageName = "samu-lab"
-            packageVersion = "1.0.0"
-            description = "SaMu Lab - Local AI Chat & OpenAI-Compatible Server"
+            packageVersion = "1.1.0"
+            description = "SaMu Lab - Universal Local AI Studio (Chat, Vision, Image, Audio & Video)"
             vendor = "NeuraSaMu"
             linux {
                 shortcut = true

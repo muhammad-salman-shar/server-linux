@@ -68,14 +68,30 @@ enum class ShortcutAction {
     CLOSE_MODALS
 }
 
+private val SUPPORTED_MODEL_EXTS = setOf(".gguf", ".safetensors", ".ckpt", ".onnx")
+
+private fun isSupportedModelFile(f: File): Boolean {
+    if (!f.isFile) return false
+    val n = f.name.lowercase()
+    return SUPPORTED_MODEL_EXTS.any { n.endsWith(it) }
+}
+
 private fun scanModels(savedPaths: List<String>): List<File> {
     val dir = SettingsStore.modelsDir().toFile()
-    val localFiles = (dir.listFiles { f -> f.isFile && f.name.lowercase().endsWith(".gguf") } ?: emptyArray()).toList()
-    val linkedFiles = savedPaths.map { File(it) }.filter { it.isFile && it.name.lowercase().endsWith(".gguf") }
+    val localFiles = (dir.listFiles { f -> isSupportedModelFile(f) } ?: emptyArray()).toList()
+    val linkedFiles = savedPaths.map { File(it) }.filter { isSupportedModelFile(it) }
     return (localFiles + linkedFiles)
         .map { it.absoluteFile.normalize() }
         .distinctBy { it.path }
         .sortedBy { it.name.lowercase() }
+}
+
+private fun nameHintsThinking(name: String): Boolean {
+    val l = name.lowercase()
+    return listOf(
+        "qwen3", "deepseek-r1", "deepseek_r1", "qwq", "thinking", "reason", "r1-",
+        "o1", "o3", "o4", "cogito", "marco-o1", "glm-4.5", "gpt-oss", "gemini-2.5", "claude-3.7"
+    ).any { l.contains(it) }
 }
 
 @Composable
@@ -111,6 +127,7 @@ private fun SaMuLabRoot(
     // --- Shared Live Server State ---
     var serverSettings by remember { mutableStateOf(SettingsStore.load()) }
     val engine = remember { EngineManager() }
+    val mediaEngines = remember { MediaEngines() }
     val monitor = remember { ServerMonitor() }
     val telemetry by monitor.state.collectAsState()
     var apiServer by remember { mutableStateOf<ApiServer?>(null) }
@@ -118,9 +135,15 @@ private fun SaMuLabRoot(
     var isStarting by remember { mutableStateOf(false) }
     var localIp by remember { mutableStateOf(getLocalIp()) }
     var models by remember { mutableStateOf(scanModels(serverSettings.modelPaths)) }
-    var loadedModelPath by remember { mutableStateOf<String?>(models.firstOrNull()?.absolutePath) }
+    var loadedModelPath by remember {
+        mutableStateOf<String?>(
+            models.firstOrNull { serverSettings.profileFor(it).kind == ModelKind.TEXT_VISION }?.absolutePath
+                ?: models.firstOrNull()?.absolutePath
+        )
+    }
     var serverStatusMsg by remember { mutableStateOf<String?>(null) }
     var serverStatusErr by remember { mutableStateOf(false) }
+    var engineSupportsThinking by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -133,14 +156,17 @@ private fun SaMuLabRoot(
     // --- Shared Live Chat State ---
     val chatClient = remember { ChatClient() }
     val ttsPlayer = remember { LinuxTtsPlayer() }
+    val audioPlayer = remember { InAppAudioPlayer() }
     var speakingMsgId by remember { mutableStateOf<String?>(null) }
+    var playingAudioPath by remember { mutableStateOf<String?>(null) }
+    var chatMode by remember { mutableStateOf(ChatMode.CHAT) }
 
     var customApis by remember { mutableStateOf(ChatStore.loadApis()) }
     val builtInLocalApi = remember(serverSettings.port, serverSettings.modelApiName, serverSettings.requireAuth, serverSettings.apiKey) {
         ApiConfig(
             id = LOCAL_SAMU_API_ID,
             label = "SaMu Lab (Local)",
-            baseUrl = "http://127.0.0.1:${serverSettings.port}/v1",
+            baseUrl = "http" + "://127.0.0.1:${serverSettings.port}/v1",
             modelName = serverSettings.modelApiName,
             apiKey = if (serverSettings.requireAuth) serverSettings.apiKey else "",
             isBuiltInLocal = true
@@ -149,6 +175,29 @@ private fun SaMuLabRoot(
     val allApis = remember(builtInLocalApi, customApis) { listOf(builtInLocalApi) + customApis }
     val activeApi = remember(allApis, chatPrefs.activeApiId) {
         allApis.firstOrNull { it.id == chatPrefs.activeApiId } ?: allApis.firstOrNull()
+    }
+
+    // Auto-detect Thinking support for the active API/model
+    val supportsThinking = remember(activeApi, serverRunning, engineSupportsThinking, loadedModelPath, serverSettings.modelProfiles) {
+        val api = activeApi
+        when {
+            api == null -> false
+            api.isBuiltInLocal -> {
+                if (serverRunning && engine.isRunning) {
+                    engineSupportsThinking
+                } else {
+                    val f = loadedModelPath?.let { File(it) }
+                    if (f != null) {
+                        when (serverSettings.profileFor(f).thinkingMode) {
+                            ThinkingSupportMode.ENABLED -> true
+                            ThinkingSupportMode.DISABLED -> false
+                            ThinkingSupportMode.AUTO -> nameHintsThinking(f.name)
+                        }
+                    } else false
+                }
+            }
+            else -> nameHintsThinking(api.modelName) || nameHintsThinking(api.label)
+        }
     }
 
     var chats by remember {
@@ -183,7 +232,7 @@ private fun SaMuLabRoot(
     fun showToast(msg: String) {
         toastMsg = msg
         scope.launch {
-            delay(2000)
+            delay(2200)
             if (toastMsg == msg) toastMsg = null
         }
     }
@@ -209,9 +258,27 @@ private fun SaMuLabRoot(
         engine.stop()
         serverRunning = false
         isStarting = false
+        engineSupportsThinking = false
         monitor.resetSession()
         monitor.log("INFO", "Server stopped")
         if (clearModel) loadedModelPath = null
+    }
+
+    fun startMediaOnlyServer() {
+        try {
+            runCatching { apiServer?.stop() }
+            localIp = getLocalIp()
+            apiServer = ApiServer({ serverSettings }, engine, mediaEngines, { models }, monitor).also { it.start() }
+            serverRunning = true
+            monitor.markReady()
+            val host = if (serverSettings.lanAccess) localIp else "127.0.0.1"
+            setServerStatus("Media API running on http://$host:${serverSettings.port}/v1", error = false)
+        } catch (e: Exception) {
+            apiServer = null
+            serverRunning = false
+            monitor.log("ERR", "API server bind failed: ${e.message}")
+            setServerStatus("API server failed: ${e.message}", error = true)
+        }
     }
 
     fun startServerWithModel(modelFile: File) {
@@ -220,15 +287,22 @@ private fun SaMuLabRoot(
             setServerStatus("Model file not found: ${modelFile.name}", error = true)
             return
         }
+        val profile = serverSettings.profileFor(modelFile)
+        if (profile.kind != ModelKind.TEXT_VISION) {
+            startMediaOnlyServer()
+            return
+        }
+
         localIp = getLocalIp()
         loadedModelPath = modelFile.absolutePath
         isStarting = true
         setServerStatus("Preparing ${modelFile.name}...", error = false)
-        monitor.log("INFO", "Starting model ${modelFile.name}")
+        monitor.log("INFO", "Starting model ${modelFile.name}${if (profile.hasVision()) " + mmproj" else ""}")
 
         engine.ensureEngineAndStart(
             modelPath = modelFile.toPath(),
             settings = serverSettings,
+            profile = profile,
             onProgress = { msg ->
                 scope.launch(Dispatchers.Main) {
                     setServerStatus(msg, error = false)
@@ -241,9 +315,15 @@ private fun SaMuLabRoot(
                         try {
                             runCatching { apiServer?.stop() }
                             localIp = getLocalIp()
-                            apiServer = ApiServer({ serverSettings }, engine, monitor).also { it.start() }
+                            apiServer = ApiServer({ serverSettings }, engine, mediaEngines, { models }, monitor).also { it.start() }
                             serverRunning = true
+                            engineSupportsThinking = engine.capabilities.supportsThinking
                             monitor.markReady()
+                            val capsNote = buildList {
+                                if (engine.capabilities.supportsThinking) add("Thinking")
+                                if (engine.capabilities.supportsVision) add("Vision")
+                            }.joinToString(" + ")
+                            if (capsNote.isNotBlank()) monitor.log("INFO", "Detected capabilities: $capsNote")
                             val host = if (serverSettings.lanAccess) localIp else "127.0.0.1"
                             setServerStatus("Running on http://$host:${serverSettings.port}/v1", error = false)
                         } catch (e: Exception) {
@@ -260,32 +340,128 @@ private fun SaMuLabRoot(
                     }
                 }
             },
-            onUnexpectedExit = { code ->
+            onUnexpectedExit = { code, detail ->
                 scope.launch(Dispatchers.Main) {
                     runCatching { apiServer?.stop() }
                     apiServer = null
                     serverRunning = false
                     isStarting = false
+                    engineSupportsThinking = false
                     monitor.resetSession()
-                    monitor.log("ERR", "Engine crashed (exit $code)")
-                    setServerStatus("Engine exited unexpectedly (code $code). Check engine.log", error = true)
+                    val reason = if (detail.isNotBlank()) "Engine exited ($code): $detail"
+                    else "Engine exited unexpectedly (code=$code). Check engine.log"
+                    monitor.log("ERR", reason)
+                    setServerStatus(reason, error = true)
                 }
             }
         )
     }
 
+    // --- Media Generation (Image / Audio / Video) ---
+    fun runMediaGeneration(chatId: String, mode: ChatMode, prompt: String) {
+        val api = activeApi
+        if (api == null) {
+            showToast("Select or add an API first.")
+            return
+        }
+        isStreaming = true
+        streamingText = when (mode) {
+            ChatMode.IMAGE -> "Generating image..."
+            ChatMode.AUDIO -> "Synthesizing audio..."
+            ChatMode.VIDEO -> "Generating video..."
+            ChatMode.CHAT -> ""
+        }
+        streamingChatId = chatId
+
+        scope.launch(Dispatchers.IO) {
+            val result: Result<GeneratedMedia> = if (api.isBuiltInLocal) {
+                val startNanos = monitor.onRequestStart("/local/${mode.name.lowercase()}", "SaMu-Chat", false)
+                val fileRes = when (mode) {
+                    ChatMode.IMAGE -> {
+                        val m = models.firstOrNull { serverSettings.profileFor(it).kind == ModelKind.IMAGE_GEN }
+                        mediaEngines.generateImage(prompt, m, m?.let { serverSettings.profileFor(it) }, serverSettings) { p ->
+                            scope.launch(Dispatchers.Main) { streamingText = p }
+                        }
+                    }
+                    ChatMode.AUDIO -> {
+                        val m = models.firstOrNull { serverSettings.profileFor(it).kind == ModelKind.AUDIO_TTS }
+                        mediaEngines.generateAudio(prompt, m, m?.let { serverSettings.profileFor(it) }) { p ->
+                            scope.launch(Dispatchers.Main) { streamingText = p }
+                        }
+                    }
+                    ChatMode.VIDEO -> {
+                        val m = models.firstOrNull { serverSettings.profileFor(it).kind == ModelKind.VIDEO_GEN }
+                        mediaEngines.generateVideo(prompt, m, m?.let { serverSettings.profileFor(it) }, serverSettings) { p ->
+                            scope.launch(Dispatchers.Main) { streamingText = p }
+                        }
+                    }
+                    ChatMode.CHAT -> Result.failure(Exception("Unsupported media mode"))
+                }
+                fileRes.fold(
+                    onSuccess = { outFile ->
+                        monitor.onRequestEnd("/local/${mode.name.lowercase()}", startNanos, true, outFile.name)
+                        val folder = when (mode) {
+                            ChatMode.IMAGE -> "images"
+                            ChatMode.AUDIO -> "audio"
+                            else -> "videos"
+                        }
+                        val host = if (serverSettings.lanAccess) localIp else "127.0.0.1"
+                        val remoteUrl = if (serverRunning) "http" + "://$host:${serverSettings.port}/media/$folder/${outFile.name}" else ""
+                        Result.success(
+                            GeneratedMedia(
+                                kind = mode.name.lowercase(),
+                                localPath = outFile.absolutePath,
+                                remoteUrl = remoteUrl,
+                                prompt = prompt
+                            )
+                        )
+                    },
+                    onFailure = { err ->
+                        monitor.onRequestEnd("/local/${mode.name.lowercase()}", startNanos, false, err.message ?: "failed")
+                        Result.failure(err)
+                    }
+                )
+            } else {
+                when (mode) {
+                    ChatMode.IMAGE -> chatClient.requestImageGeneration(api, prompt)
+                    ChatMode.AUDIO -> chatClient.requestAudioGeneration(api, prompt)
+                    ChatMode.VIDEO -> chatClient.requestVideoGeneration(api, prompt)
+                    ChatMode.CHAT -> Result.failure(Exception("Unsupported media mode"))
+                }
+            }
+
+            withContext(Dispatchers.Main) {
+                isStreaming = false
+                streamingText = ""
+                streamingChatId = null
+                val replyMsg = result.fold(
+                    onSuccess = { med ->
+                        ChatMessage(role = "assistant", content = "", media = listOf(med))
+                    },
+                    onFailure = { err ->
+                        ChatMessage(role = "assistant", content = err.message ?: "Generation failed", isError = true)
+                    }
+                )
+                updateChatById(chatId) { c ->
+                    c.copy(messages = c.messages + replyMsg, updatedAt = System.currentTimeMillis())
+                }
+            }
+        }
+    }
+
+    // --- Chat Controls ---
     fun runAssistantForChat(chatId: String, history: List<ChatMessage>) {
         val api = activeApi
         if (api == null) {
             showToast("Please select or add an API first.")
             return
         }
-        if (api.isBuiltInLocal && !serverRunning) {
+        if (api.isBuiltInLocal && (!serverRunning || !engine.isRunning)) {
             updateChatById(chatId) { c ->
                 c.copy(
                     messages = c.messages + ChatMessage(
                         role = "assistant",
-                        content = "Local SaMu Lab server is stopped. Switch to the Server tab and click Start Server.",
+                        content = "Local SaMu Lab LLM server is stopped. Switch to the Server tab and click Start Server.",
                         isError = true
                     )
                 )
@@ -303,6 +479,9 @@ private fun SaMuLabRoot(
                 api = api,
                 history = history,
                 globalInstructions = globalInstr,
+                supportsThinking = supportsThinking,
+                thinkingEnabled = chatPrefs.thinkingEnabled,
+                thinkingEffort = chatPrefs.thinkingEffort,
                 onDelta = { partial ->
                     scope.launch(Dispatchers.Main) {
                         streamingText = partial
@@ -349,7 +528,12 @@ private fun SaMuLabRoot(
         }
         inputText = ""
         attachments = emptyList()
-        runAssistantForChat(targetChat.id, newHistory)
+
+        if (chatMode == ChatMode.CHAT) {
+            runAssistantForChat(targetChat.id, newHistory)
+        } else {
+            runMediaGeneration(targetChat.id, chatMode, trimmed)
+        }
     }
 
     fun createNewChat() {
@@ -373,9 +557,18 @@ private fun SaMuLabRoot(
         if (isStreaming) return
         val idx = activeChat.messages.indexOfFirst { it.id == msg.id }
         if (idx < 0) return
+        val med = msg.media.firstOrNull()
         val trimmedHistory = activeChat.messages.take(idx)
         updateChatById(activeChat.id) { c -> c.copy(messages = trimmedHistory) }
-        if (trimmedHistory.isNotEmpty()) {
+        if (med != null && med.prompt.isNotBlank()) {
+            val m = when (med.kind.lowercase()) {
+                "image" -> ChatMode.IMAGE
+                "audio" -> ChatMode.AUDIO
+                "video" -> ChatMode.VIDEO
+                else -> ChatMode.CHAT
+            }
+            runMediaGeneration(activeChat.id, m, med.prompt)
+        } else if (trimmedHistory.isNotEmpty()) {
             runAssistantForChat(activeChat.id, trimmedHistory)
         }
     }
@@ -416,6 +609,7 @@ private fun SaMuLabRoot(
 
     DisposableEffect(Unit) {
         onDispose {
+            audioPlayer.stop()
             ttsPlayer.stop()
             chatClient.shutdown()
             runCatching { apiServer?.stop() }
@@ -545,6 +739,17 @@ private fun SaMuLabRoot(
                         activeApi = activeApi,
                         localServerRunning = serverRunning,
                         contextSize = serverSettings.contextSize,
+                        supportsThinking = supportsThinking,
+                        thinkingEnabled = chatPrefs.thinkingEnabled,
+                        thinkingEffort = chatPrefs.thinkingEffort,
+                        chatMode = chatMode,
+                        onChatModeChange = { chatMode = it },
+                        onToggleThinking = {
+                            onUpdatePrefs(chatPrefs.copy(thinkingEnabled = !chatPrefs.thinkingEnabled))
+                        },
+                        onThinkingEffortChange = { eff ->
+                            onUpdatePrefs(chatPrefs.copy(thinkingEnabled = true, thinkingEffort = eff))
+                        },
                         chats = chats,
                         activeChat = activeChat,
                         inputText = inputText,
@@ -555,6 +760,40 @@ private fun SaMuLabRoot(
                         isStreaming = isStreaming && streamingChatId == activeChat.id,
                         streamingText = if (streamingChatId == activeChat.id) streamingText else "",
                         speakingMsgId = speakingMsgId,
+                        audioPlayer = audioPlayer,
+                        playingAudioPath = playingAudioPath,
+                        onToggleAudio = { path ->
+                            val err = audioPlayer.toggle(path) {
+                                scope.launch(Dispatchers.Main) { playingAudioPath = null }
+                            }
+                            if (err != null) {
+                                showToast(err)
+                            } else {
+                                playingAudioPath = audioPlayer.playingPath
+                            }
+                        },
+                        onDownloadMedia = { med ->
+                            val src = File(med.localPath)
+                            val saved = saveBinaryFileDialog("Save ${med.kind}", src.name, src)
+                            if (saved != null) showToast("Saved ${saved.name}")
+                        },
+                        onShareMedia = { med ->
+                            val shareTarget = med.remoteUrl.ifBlank { med.localPath }
+                            if (copyToClipboard(shareTarget)) {
+                                showToast(if (med.remoteUrl.isNotBlank()) "Share URL copied!" else "File path copied!")
+                            }
+                        },
+                        onRegenerateMedia = { med ->
+                            if (!isStreaming && med.prompt.isNotBlank()) {
+                                val mode = when (med.kind.lowercase()) {
+                                    "image" -> ChatMode.IMAGE
+                                    "audio" -> ChatMode.AUDIO
+                                    "video" -> ChatMode.VIDEO
+                                    else -> ChatMode.CHAT
+                                }
+                                runMediaGeneration(activeChat.id, mode, med.prompt)
+                            }
+                        },
                         onSelectApi = { api -> onUpdatePrefs(chatPrefs.copy(activeApiId = api.id)) },
                         onOpenAddApi = { editingApi = null; showApiModal = true },
                         onOpenEditApi = { api -> editingApi = api; showApiModal = true },
@@ -623,22 +862,32 @@ private fun SaMuLabRoot(
                                 stopServer(clearModel = false)
                                 setServerStatus("Server stopped.", error = false)
                             } else {
-                                val selected = models.find { it.absolutePath == loadedModelPath } ?: models.firstOrNull()
+                                val selected = models.find { it.absolutePath == loadedModelPath }
+                                    ?: models.firstOrNull { serverSettings.profileFor(it).kind == ModelKind.TEXT_VISION }
+                                    ?: models.firstOrNull()
                                 if (selected == null) {
-                                    setServerStatus("Please add a .gguf model first using '+ Add Model'.", error = true)
+                                    setServerStatus("Please add a model first using '+ Add Model'.", error = true)
                                 } else {
                                     startServerWithModel(selected)
                                 }
                             }
                         },
                         onSelectModel = { file ->
-                            if (serverRunning) {
+                            val profile = serverSettings.profileFor(file)
+                            if (profile.kind != ModelKind.TEXT_VISION) {
+                                showToast("${file.name} is ready for ${profile.kind.label}!")
+                            } else if (serverRunning) {
                                 stopServer(clearModel = false)
                                 startServerWithModel(file)
                             } else {
                                 loadedModelPath = file.absolutePath
                                 setServerStatus("Loaded ${file.name}. Click Start Server.", error = false)
                             }
+                        },
+                        onSaveModelProfile = { updatedProfile ->
+                            serverSettings = serverSettings.withProfile(updatedProfile)
+                            SettingsStore.save(serverSettings)
+                            showToast("Model config saved! Restart server if this model is running.")
                         },
                         onRemoveModel = { file ->
                             if (loadedModelPath == file.absolutePath) stopServer(clearModel = true)
@@ -663,11 +912,16 @@ private fun SaMuLabRoot(
                         },
                         onAddModelFile = { pickedFile ->
                             val updatedPaths = (serverSettings.modelPaths + pickedFile.path).distinct()
-                            serverSettings = serverSettings.copy(modelPaths = updatedPaths)
+                            val defaultProf = serverSettings.profileFor(pickedFile)
+                            serverSettings = serverSettings.copy(modelPaths = updatedPaths).withProfile(defaultProf)
                             SettingsStore.save(serverSettings)
                             models = scanModels(updatedPaths)
-                            loadedModelPath = pickedFile.path
-                            setServerStatus("Loaded ${pickedFile.name}. Click Start Server.", error = false)
+                            if (defaultProf.kind == ModelKind.TEXT_VISION) {
+                                loadedModelPath = pickedFile.path
+                                setServerStatus("Loaded ${pickedFile.name}. Click Start Server.", error = false)
+                            } else {
+                                setServerStatus("Added ${pickedFile.name} (${defaultProf.kind.label}).", error = false)
+                            }
                         },
                         onSaveServerSettings = { updated ->
                             val safe = updated.validated()

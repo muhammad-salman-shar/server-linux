@@ -1,5 +1,6 @@
 package neurasamu.build.samulab.linux
 
+import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -73,15 +75,24 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
-        if (trimmed.startsWith("```")) {
-            val lang = trimmed.removePrefix("```").trim()
+        // Fenced code blocks (supports ``` and ~~~, plus inline single-line ```code```)
+        if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+            val fence = if (trimmed.startsWith("```")) "```" else "~~~"
+            val afterOpen = trimmed.removePrefix(fence)
+            val closingInSameLine = afterOpen.indexOf(fence)
+            if (closingInSameLine > 0) {
+                blocks.add(MdBlock.CodeBlock("", afterOpen.substring(0, closingInSameLine).trim()))
+                i++
+                continue
+            }
+            val lang = afterOpen.trim().substringBefore(" ").trim()
             val codeLines = mutableListOf<String>()
             i++
-            while (i < lines.size && !lines[i].trim().startsWith("```")) {
+            while (i < lines.size && !lines[i].trim().startsWith(fence)) {
                 codeLines.add(lines[i])
                 i++
             }
-            if (i < lines.size && lines[i].trim().startsWith("```")) i++
+            if (i < lines.size && lines[i].trim().startsWith(fence)) i++
             blocks.add(MdBlock.CodeBlock(lang, codeLines.joinToString("\n")))
             continue
         }
@@ -92,6 +103,11 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
+        if (trimmed.startsWith("#### ")) {
+            blocks.add(MdBlock.Heading(3, trimmed.removePrefix("#### ").trim()))
+            i++
+            continue
+        }
         if (trimmed.startsWith("### ")) {
             blocks.add(MdBlock.Heading(3, trimmed.removePrefix("### ").trim()))
             i++
@@ -149,9 +165,11 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             val next = lines[i].trim()
             if (next.isEmpty() ||
                 next.startsWith("```") ||
+                next.startsWith("~~~") ||
                 next.startsWith("# ") ||
                 next.startsWith("## ") ||
                 next.startsWith("### ") ||
+                next.startsWith("#### ") ||
                 next.startsWith(">") ||
                 next.startsWith("- ") ||
                 next.startsWith("* ") ||
@@ -241,11 +259,23 @@ private fun buildInlineAnnotated(
             }
         }
 
+        if (i + 2 < n && text[i] == '*' && text[i + 1] == '*' && text[i + 2] == '*') {
+            val end = text.indexOf("***", i + 3)
+            if (end > i + 3) {
+                flushPlain()
+                pushStyle(SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic))
+                append(buildInlineAnnotated(text.substring(i + 3, end), palette, scale))
+                pop()
+                i = end + 3
+                continue
+            }
+        }
+
         if (i + 1 < n && text[i] == '*' && text[i + 1] == '*') {
             val end = text.indexOf("**", i + 2)
             if (end > i + 2) {
                 flushPlain()
-                pushStyle(SpanStyle(fontWeight = FontWeight.SemiBold))
+                pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
                 append(buildInlineAnnotated(text.substring(i + 2, end), palette, scale))
                 pop()
                 i = end + 2
@@ -265,7 +295,7 @@ private fun buildInlineAnnotated(
             }
         }
 
-        if (text[i] == '*') {
+        if (text[i] == '*' && (i + 1 < n && !text[i + 1].isWhitespace())) {
             val end = text.indexOf('*', i + 1)
             if (end > i + 1) {
                 flushPlain()
@@ -440,6 +470,7 @@ private fun FencedCodeCard(
     val palette = LocalSaMuColors.current
     val scale = LocalFontScale.current
     val scope = rememberCoroutineScope()
+    val hScroll = rememberScrollState()
     var copied by remember { mutableStateOf(false) }
 
     Column(
@@ -494,19 +525,28 @@ private fun FencedCodeCard(
             }
         }
 
-        SelectionContainer {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(10.dp)
-            ) {
-                Text(
-                    text = code,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = (12f * scale).sp,
-                    lineHeight = (12f * scale * 1.45f).sp,
-                    color = palette.codeText
+        Column(modifier = Modifier.fillMaxWidth()) {
+            SelectionContainer {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(hScroll)
+                        .padding(10.dp)
+                ) {
+                    Text(
+                        text = code,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = (12f * scale).sp,
+                        lineHeight = (12f * scale * 1.45f).sp,
+                        color = palette.codeText
+                    )
+                }
+            }
+            if (hScroll.maxValue > 0) {
+                HorizontalScrollbar(
+                    adapter = rememberScrollbarAdapter(hScroll),
+                    style = samuScrollbarStyle(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp)
                 )
             }
         }
@@ -520,34 +560,20 @@ private fun MarkdownTable(
     palette: SaMuPalette,
     scale: Float
 ) {
+    val hScroll = rememberScrollState()
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
     ) {
-        Row(modifier = Modifier.background(palette.surfaceVariant)) {
-            headers.forEach { cell ->
-                Text(
-                    text = EmojiSupport.format(cell),
-                    fontSize = (12f * scale).sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.onSurface,
-                    modifier = Modifier
-                        .width(140.dp)
-                        .border(0.5.dp, palette.divider)
-                        .padding(8.dp)
-                )
-            }
-        }
-        rows.forEach { row ->
-            Row {
-                val cols = maxOf(headers.size, row.size)
-                for (c in 0 until cols) {
+        Column(modifier = Modifier.fillMaxWidth().horizontalScroll(hScroll)) {
+            Row(modifier = Modifier.background(palette.surfaceVariant)) {
+                headers.forEach { cell ->
                     Text(
-                        text = EmojiSupport.format(row.getOrElse(c) { "" }),
+                        text = EmojiSupport.format(cell),
                         fontSize = (12f * scale).sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = palette.onSurface,
                         modifier = Modifier
                             .width(140.dp)
@@ -556,6 +582,29 @@ private fun MarkdownTable(
                     )
                 }
             }
+            rows.forEach { row ->
+                Row {
+                    val cols = maxOf(headers.size, row.size)
+                    for (c in 0 until cols) {
+                        Text(
+                            text = EmojiSupport.format(row.getOrElse(c) { "" }),
+                            fontSize = (12f * scale).sp,
+                            color = palette.onSurface,
+                            modifier = Modifier
+                                .width(140.dp)
+                                .border(0.5.dp, palette.divider)
+                                .padding(8.dp)
+                        )
+                    }
+                }
+            }
+        }
+        if (hScroll.maxValue > 0) {
+            HorizontalScrollbar(
+                adapter = rememberScrollbarAdapter(hScroll),
+                style = samuScrollbarStyle(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp)
+            )
         }
     }
 }

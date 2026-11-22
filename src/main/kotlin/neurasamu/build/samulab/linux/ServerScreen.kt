@@ -1,6 +1,7 @@
 package neurasamu.build.samulab.linux
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -20,12 +21,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -33,6 +37,7 @@ import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -77,6 +82,7 @@ fun ServerScreen(
     onModelApiNameChange: (String) -> Unit,
     onStartOrStop: () -> Unit,
     onSelectModel: (File) -> Unit,
+    onSaveModelProfile: (ModelProfile) -> Unit,
     onRemoveModel: (File) -> Unit,
     onAddModelFile: (File) -> Unit,
     onSaveServerSettings: (AppSettings) -> Unit,
@@ -84,10 +90,12 @@ fun ServerScreen(
     onCopyToast: (String) -> Unit
 ) {
     val palette = LocalSaMuColors.current
+    val hw = remember { HardwareDetector.detect() }
     var showServerSettings by remember { mutableStateOf(false) }
+    var configuringModelFile by remember { mutableStateOf<File?>(null) }
 
     val displayHost = if (settings.lanAccess) localIp else "127.0.0.1"
-    val apiBaseUrl = "http://$displayHost:${settings.port}/v1"
+    val apiBaseUrl = "http" + "://$displayHost:${settings.port}/v1"
 
     Box(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -167,6 +175,7 @@ fun ServerScreen(
 
                         ServerInfoRow(if (settings.lanAccess) "API URL" else "Local URL", apiBaseUrl)
                         ServerInfoRow("Model Name", settings.modelApiName)
+                        ServerInfoRow("Context Window", if (settings.contextSize == 0) "Auto (Model Max)" else settings.contextSize.toString())
                         if (settings.requireAuth) {
                             ServerInfoRow("API Key", settings.apiKey)
                         }
@@ -228,7 +237,7 @@ fun ServerScreen(
                     }
                 }
 
-                // Models Header with clean non-overlapping "+ Add Model" button
+                // Models Header
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -242,7 +251,10 @@ fun ServerScreen(
                     )
                     Button(
                         onClick = {
-                            openFilePicker("Select GGUF Model", setOf(".gguf"))?.let(onAddModelFile)
+                            openFilePicker(
+                                "Select Model (.gguf, .safetensors, .ckpt, .onnx)",
+                                setOf(".gguf", ".safetensors", ".ckpt", ".onnx")
+                            )?.let(onAddModelFile)
                         },
                         shape = RoundedCornerShape(8.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
@@ -255,6 +267,7 @@ fun ServerScreen(
                     }
                 }
 
+                val modelsListState = rememberLazyListState()
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (models.isEmpty()) {
                         Box(
@@ -266,27 +279,36 @@ fun ServerScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                "No models yet. Click '+ Add Model' to pick a .gguf file from storage.",
+                                "No models yet. Click '+ Add Model' to pick LLM, Image, Audio or Video models.",
                                 color = palette.textSecondary,
                                 fontSize = 13.sp
                             )
                         }
                     } else {
                         LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
+                            state = modelsListState,
+                            modifier = Modifier.fillMaxSize().padding(end = 12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             contentPadding = PaddingValues(bottom = 8.dp)
                         ) {
                             items(models, key = { it.absolutePath }) { file ->
+                                val profile = settings.profileFor(file)
                                 ServerModelRow(
                                     file = file,
+                                    profile = profile,
                                     isLoaded = loadedModelPath == file.absolutePath,
                                     isRunning = serverRunning && loadedModelPath == file.absolutePath,
                                     onLoad = { onSelectModel(file) },
+                                    onConfigure = { configuringModelFile = file },
                                     onDelete = { onRemoveModel(file) }
                                 )
                             }
                         }
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(modelsListState),
+                            style = samuScrollbarStyle(),
+                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+                        )
                     }
                 }
             }
@@ -300,13 +322,19 @@ fun ServerScreen(
             ) {
                 Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Real-Time Monitor",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.onSurface
-                        )
-                        Spacer(Modifier.weight(1f))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Real-Time Monitor",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.onSurface
+                            )
+                            Text(
+                                hw.tierLabel,
+                                fontSize = 11.sp,
+                                color = palette.textTertiary
+                            )
+                        }
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(22.dp))
@@ -347,6 +375,7 @@ fun ServerScreen(
                     )
                     Spacer(Modifier.height(8.dp))
 
+                    val logsListState = rememberLazyListState()
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -365,7 +394,11 @@ fun ServerScreen(
                                 )
                             }
                         } else {
-                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            LazyColumn(
+                                state = logsListState,
+                                modifier = Modifier.fillMaxSize().padding(end = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 items(telemetry.logs, key = { it.id }) { entry ->
                                     val badgeColor = when (entry.level) {
                                         "ACTIVE" -> palette.primary
@@ -392,12 +425,17 @@ fun ServerScreen(
                                             fontSize = 11.sp,
                                             fontFamily = FontFamily.Monospace,
                                             color = palette.onSurface,
-                                            maxLines = 2,
+                                            maxLines = 3,
                                             overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 }
                             }
+                            VerticalScrollbar(
+                                adapter = rememberScrollbarAdapter(logsListState),
+                                style = samuScrollbarStyle(),
+                                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+                            )
                         }
                     }
                 }
@@ -411,6 +449,18 @@ fun ServerScreen(
                 onSave = { updated ->
                     showServerSettings = false
                     onSaveServerSettings(updated)
+                }
+            )
+        }
+
+        configuringModelFile?.let { modelFile ->
+            ModelSettingsModal(
+                modelFile = modelFile,
+                initialProfile = settings.profileFor(modelFile),
+                onDismiss = { configuringModelFile = null },
+                onSave = { updatedProfile ->
+                    configuringModelFile = null
+                    onSaveModelProfile(updatedProfile)
                 }
             )
         }
@@ -448,9 +498,11 @@ private fun ServerInfoRow(label: String, value: String) {
 @Composable
 private fun ServerModelRow(
     file: File,
+    profile: ModelProfile,
     isLoaded: Boolean,
     isRunning: Boolean,
     onLoad: () -> Unit,
+    onConfigure: () -> Unit,
     onDelete: () -> Unit
 ) {
     val palette = LocalSaMuColors.current
@@ -467,30 +519,66 @@ private fun ServerModelRow(
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(Icons.Filled.Storage, contentDescription = null, tint = palette.primary, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(file.name, fontWeight = FontWeight.Medium, fontSize = 13.sp, color = palette.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(sizeText, color = palette.textSecondary, fontSize = 11.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(sizeText, color = palette.textSecondary, fontSize = 11.sp)
+                    SmallTag(profile.kind.badge, palette.surfaceVariant, palette.textSecondary)
+                    if (profile.hasVision()) {
+                        SmallTag("VISION", palette.primary.copy(alpha = 0.18f), palette.primary)
+                    }
+                    if (profile.extraFiles.isNotEmpty()) {
+                        SmallTag("+${profile.extraFiles.size} file${if (profile.extraFiles.size > 1) "s" else ""}", palette.surfaceVariant, palette.success)
+                    }
+                }
             }
-            if (isLoaded) {
-                Text(
-                    if (isRunning) "RUNNING" else "LOADED",
-                    color = if (isRunning) palette.success else palette.primary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(end = 8.dp)
-                )
+            if (profile.kind == ModelKind.TEXT_VISION) {
+                if (isLoaded) {
+                    Text(
+                        if (isRunning) "RUNNING" else "LOADED",
+                        color = if (isRunning) palette.success else palette.primary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                } else {
+                    TextButton(onClick = onLoad, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Text("Load", color = palette.primary, fontSize = 12.sp)
+                    }
+                }
             } else {
-                TextButton(onClick = onLoad) { Text("Load", color = palette.primary) }
+                Text(
+                    "READY",
+                    color = palette.success,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(end = 6.dp)
+                )
+            }
+            IconButton(onClick = onConfigure, modifier = Modifier.size(30.dp)) {
+                Icon(Icons.Filled.Tune, contentDescription = "Model Settings & Extra Files", tint = palette.textSecondary, modifier = Modifier.size(18.dp))
             }
             IconButton(onClick = onDelete, modifier = Modifier.size(30.dp)) {
                 Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = palette.error, modifier = Modifier.size(18.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun SmallTag(text: String, bg: Color, fg: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(bg)
+            .padding(horizontal = 5.dp, vertical = 1.dp)
+    ) {
+        Text(text, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = fg)
     }
 }
 
@@ -501,6 +589,9 @@ private fun ServerSettingsModal(
     onSave: (AppSettings) -> Unit
 ) {
     val palette = LocalSaMuColors.current
+    val hw = remember { HardwareDetector.detect() }
+    val scrollState = rememberScrollState()
+
     var port by remember(settings) { mutableStateOf(settings.port.toString()) }
     var lan by remember(settings) { mutableStateOf(settings.lanAccess) }
     var threads by remember(settings) { mutableStateOf(settings.threadsOverride.toString()) }
@@ -512,7 +603,7 @@ private fun ServerSettingsModal(
     ModalOverlay(onDismiss = onDismiss) {
         Column(
             modifier = Modifier
-                .widthIn(min = 360.dp, max = 480.dp)
+                .widthIn(min = 360.dp, max = 500.dp)
                 .fillMaxWidth(0.92f)
                 .heightIn(max = 680.dp)
                 .clip(RoundedCornerShape(14.dp))
@@ -533,78 +624,117 @@ private fun ServerSettingsModal(
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
-            Column(
-                modifier = Modifier
-                    .weight(1f, fill = false)
-                    .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                ModalField(
-                    label = "PORT (1024–65535)",
-                    value = port,
-                    onChange = { port = it.filter(Char::isDigit); errorMsg = null },
-                    placeholder = "8080"
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+            Box(modifier = Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(scrollState)
+                        .padding(start = 20.dp, end = 26.dp, top = 16.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("LAN Access", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.onSurface)
-                        Text("Allow phones & other devices on same Wi-Fi", fontSize = 11.sp, color = palette.textTertiary)
-                    }
-                    Switch(checked = lan, onCheckedChange = { lan = it })
-                }
-
-                ModalField(
-                    label = "CPU THREADS (0 = AUTO)",
-                    value = threads,
-                    onChange = { threads = it.filter(Char::isDigit) },
-                    placeholder = "0"
-                )
-
-                ModalField(
-                    label = "CONTEXT SIZE (512–131072)",
-                    value = ctx,
-                    onChange = { ctx = it.filter(Char::isDigit) },
-                    placeholder = "4096"
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Require API Key", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.onSurface)
-                        Text("Protect your server with a Bearer key", fontSize = 11.sp, color = palette.textTertiary)
-                    }
-                    Switch(checked = auth, onCheckedChange = { auth = it })
-                }
-
-                ModalField(
-                    label = "CUSTOM API KEY (MIN 8 CHARS)",
-                    value = customKey,
-                    onChange = { customKey = it; errorMsg = null },
-                    placeholder = "Enter at least 8 characters...",
-                    trailingIcon = {
-                        IconButton(onClick = { customKey = AppSettings.generateKey(); errorMsg = null }) {
-                            Icon(
-                                Icons.Filled.Refresh,
-                                contentDescription = "Generate Random API Key",
-                                tint = palette.primary,
-                                modifier = Modifier.size(18.dp)
-                            )
+                    // Universal Auto-Tune banner
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(palette.background)
+                            .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(hw.tierLabel, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = palette.onSurface)
+                            Text("Rec: ${hw.recommendedThreads} threads · ${hw.recommendedContext} ctx", fontSize = 11.sp, color = palette.textTertiary)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                threads = hw.recommendedThreads.toString()
+                                ctx = hw.recommendedContext.toString()
+                            },
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(1.dp, palette.primary),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Icon(Icons.Filled.AutoFixHigh, contentDescription = null, tint = palette.primary, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Auto-Tune", fontSize = 11.sp, color = palette.primary)
                         }
                     }
-                )
 
-                errorMsg?.let {
-                    Text(it, color = palette.error, fontSize = 12.sp)
+                    ModalField(
+                        label = "PORT (1024–65535)",
+                        value = port,
+                        onChange = { port = it.filter(Char::isDigit); errorMsg = null },
+                        placeholder = "8080"
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("LAN Access", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.onSurface)
+                            Text("Allow phones & other devices on same Wi-Fi", fontSize = 11.sp, color = palette.textTertiary)
+                        }
+                        Switch(checked = lan, onCheckedChange = { lan = it })
+                    }
+
+                    ModalField(
+                        label = "CPU THREADS (0 = AUTO)",
+                        value = threads,
+                        onChange = { threads = it.filter(Char::isDigit) },
+                        placeholder = "0"
+                    )
+
+                    ModalField(
+                        label = "CONTEXT WINDOW (UNLIMITED · 0 = MODEL MAX, DEFAULT 8000)",
+                        value = ctx,
+                        onChange = { ctx = it.filter(Char::isDigit) },
+                        placeholder = "8000"
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Require API Key", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.onSurface)
+                            Text("Protect your server with a Bearer key", fontSize = 11.sp, color = palette.textTertiary)
+                        }
+                        Switch(checked = auth, onCheckedChange = { auth = it })
+                    }
+
+                    ModalField(
+                        label = "CUSTOM API KEY (MIN 8 CHARS)",
+                        value = customKey,
+                        onChange = { customKey = it; errorMsg = null },
+                        placeholder = "Enter at least 8 characters...",
+                        trailingIcon = {
+                            IconButton(onClick = { customKey = AppSettings.generateKey(); errorMsg = null }) {
+                                Icon(
+                                    Icons.Filled.Refresh,
+                                    contentDescription = "Generate Random API Key",
+                                    tint = palette.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    )
+
+                    errorMsg?.let {
+                        Text(it, color = palette.error, fontSize = 12.sp)
+                    }
                 }
+
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(scrollState),
+                    style = samuScrollbarStyle(),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 4.dp, top = 4.dp, bottom = 4.dp)
+                )
             }
 
             Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
@@ -635,7 +765,7 @@ private fun ServerSettingsModal(
                                 port = port.toIntOrNull() ?: 8080,
                                 lanAccess = lan,
                                 threadsOverride = threads.toIntOrNull() ?: 0,
-                                contextSize = ctx.toIntOrNull() ?: 4096,
+                                contextSize = ctx.toIntOrNull() ?: 8000,
                                 requireAuth = auth,
                                 apiKey = trimmedKey
                             ).validated()

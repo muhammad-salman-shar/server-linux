@@ -9,6 +9,25 @@ import java.util.UUID
 
 const val LOCAL_SAMU_API_ID = "__samu_local_builtin__"
 
+enum class ThinkingEffort(val label: String, val apiValue: String) {
+    OFF("Off", "none"),
+    LOW("Low", "low"),
+    HIGH("High", "medium"),
+    MAX("Max", "high");
+
+    companion object {
+        fun fromName(name: String?): ThinkingEffort =
+            entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: HIGH
+    }
+}
+
+enum class ChatMode(val label: String) {
+    CHAT("Chat"),
+    IMAGE("Image"),
+    AUDIO("Audio"),
+    VIDEO("Video")
+}
+
 data class ApiConfig(
     val id: String = UUID.randomUUID().toString(),
     val label: String,
@@ -44,21 +63,56 @@ data class ChatAttachment(
     val path: String,
     val name: String,
     val isImage: Boolean,
-    val sizeBytes: Long = 0L
+    val sizeBytes: Long = 0L,
+    val kind: String = if (isImage) "image" else "file"
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("path", path)
         put("name", name)
         put("isImage", isImage)
         put("sizeBytes", sizeBytes)
+        put("kind", kind)
     }
 
     companion object {
-        fun fromJson(o: JSONObject): ChatAttachment = ChatAttachment(
-            path = o.optString("path", ""),
-            name = o.optString("name", "file"),
-            isImage = o.optBoolean("isImage", false),
-            sizeBytes = o.optLong("sizeBytes", 0L)
+        fun fromJson(o: JSONObject): ChatAttachment {
+            val isImg = o.optBoolean("isImage", false)
+            return ChatAttachment(
+                path = o.optString("path", ""),
+                name = o.optString("name", "file"),
+                isImage = isImg,
+                sizeBytes = o.optLong("sizeBytes", 0L),
+                kind = o.optString("kind", if (isImg) "image" else "file")
+            )
+        }
+    }
+}
+
+data class GeneratedMedia(
+    val id: String = UUID.randomUUID().toString(),
+    val kind: String, // "image", "audio", "video"
+    val localPath: String,
+    val remoteUrl: String = "",
+    val prompt: String = "",
+    val mimeType: String = ""
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id)
+        put("kind", kind)
+        put("localPath", localPath)
+        put("remoteUrl", remoteUrl)
+        put("prompt", prompt)
+        put("mimeType", mimeType)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject): GeneratedMedia = GeneratedMedia(
+            id = o.optString("id", UUID.randomUUID().toString()),
+            kind = o.optString("kind", "image"),
+            localPath = o.optString("localPath", ""),
+            remoteUrl = o.optString("remoteUrl", ""),
+            prompt = o.optString("prompt", ""),
+            mimeType = o.optString("mimeType", "")
         )
     }
 }
@@ -68,6 +122,7 @@ data class ChatMessage(
     val role: String, // "user" or "assistant"
     val content: String,
     val attachments: List<ChatAttachment> = emptyList(),
+    val media: List<GeneratedMedia> = emptyList(),
     val isError: Boolean = false,
     val timestamp: Long = System.currentTimeMillis()
 ) {
@@ -78,6 +133,7 @@ data class ChatMessage(
         put("isError", isError)
         put("timestamp", timestamp)
         put("attachments", JSONArray().apply { attachments.forEach { put(it.toJson()) } })
+        put("media", JSONArray().apply { media.forEach { put(it.toJson()) } })
     }
 
     companion object {
@@ -90,11 +146,20 @@ data class ChatMessage(
                     }
                 }
             }
+            val medArr = o.optJSONArray("media")
+            val meds = buildList {
+                if (medArr != null) {
+                    for (i in 0 until medArr.length()) {
+                        medArr.optJSONObject(i)?.let { add(GeneratedMedia.fromJson(it)) }
+                    }
+                }
+            }
             return ChatMessage(
                 id = o.optString("id", UUID.randomUUID().toString()),
                 role = o.optString("role", "user"),
                 content = o.optString("content", ""),
                 attachments = atts,
+                media = meds,
                 isError = o.optBoolean("isError", false),
                 timestamp = o.optLong("timestamp", System.currentTimeMillis())
             )
@@ -144,7 +209,9 @@ data class ChatPrefs(
     val customInstructionsEnabled: Boolean = false,
     val customInstructions: String = "",
     val activeApiId: String = LOCAL_SAMU_API_ID,
-    val activeChatId: String = ""
+    val activeChatId: String = "",
+    val thinkingEnabled: Boolean = true,
+    val thinkingEffort: ThinkingEffort = ThinkingEffort.HIGH
 ) {
     fun toJson(): String = JSONObject().apply {
         put("themeMode", themeMode.name)
@@ -153,6 +220,8 @@ data class ChatPrefs(
         put("customInstructions", customInstructions)
         put("activeApiId", activeApiId)
         put("activeChatId", activeChatId)
+        put("thinkingEnabled", thinkingEnabled)
+        put("thinkingEffort", thinkingEffort.name)
     }.toString(2)
 
     companion object {
@@ -164,7 +233,9 @@ data class ChatPrefs(
                 customInstructionsEnabled = o.optBoolean("customInstructionsEnabled", false),
                 customInstructions = o.optString("customInstructions", ""),
                 activeApiId = o.optString("activeApiId", LOCAL_SAMU_API_ID),
-                activeChatId = o.optString("activeChatId", "")
+                activeChatId = o.optString("activeChatId", ""),
+                thinkingEnabled = o.optBoolean("thinkingEnabled", true),
+                thinkingEffort = ThinkingEffort.fromName(o.optString("thinkingEffort", "HIGH"))
             )
         }
     }

@@ -17,6 +17,13 @@ import java.nio.file.StandardCopyOption
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+data class EngineCapabilities(
+    val supportsThinking: Boolean = false,
+    val supportsVision: Boolean = false,
+    val modelKind: ModelKind = ModelKind.TEXT_VISION,
+    val nativeContext: Int = 0
+)
+
 class EngineManager {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -30,6 +37,9 @@ class EngineManager {
     private val starting = AtomicBoolean(false)
     private val downloading = AtomicBoolean(false)
 
+    @Volatile var capabilities: EngineCapabilities = EngineCapabilities()
+        private set
+
     val isRunning: Boolean
         get() = running.get() && process?.isAlive == true
 
@@ -42,35 +52,34 @@ class EngineManager {
     fun ensureEngineAndStart(
         modelPath: Path,
         settings: AppSettings,
+        profile: ModelProfile = settings.profileFor(modelPath.toFile()),
         onProgress: (String) -> Unit,
         onReady: (Boolean, String?) -> Unit,
-        onUnexpectedExit: (Int) -> Unit
+        onUnexpectedExit: (Int, String) -> Unit
     ) {
         scope.launch {
-            if (!isBinaryInstalled) {
-                onProgress("Preparing built-in engine...")
-                val bundledOk = runCatching { installFromBundledResources() }.getOrDefault(false)
-                if (!bundledOk) {
-                    downloadEngine(
-                        onProgress = onProgress,
-                        onDone = { ok, err ->
-                            if (ok) {
-                                onProgress("Starting engine...")
-                                start(modelPath, settings, onReady, onUnexpectedExit)
-                            } else {
-                                onReady(false, "Auto-setup failed: ${err ?: "unknown error"}")
-                            }
+            onProgress("Checking built-in engine...")
+            val bundledFresh = runCatching { syncFromBundledResources() }.getOrDefault(false)
+            if (!isBinaryInstalled && !bundledFresh) {
+                downloadEngine(
+                    onProgress = onProgress,
+                    onDone = { ok, err ->
+                        if (ok) {
+                            onProgress("Starting engine...")
+                            start(modelPath, settings, profile, onReady, onUnexpectedExit)
+                        } else {
+                            onReady(false, "Auto-setup failed: ${err ?: "unknown error"}")
                         }
-                    )
-                    return@launch
-                }
+                    }
+                )
+                return@launch
             }
             onProgress("Starting engine...")
-            start(modelPath, settings, onReady, onUnexpectedExit)
+            start(modelPath, settings, profile, onReady, onUnexpectedExit)
         }
     }
 
-    private fun installFromBundledResources(): Boolean {
+    private fun syncFromBundledResources(): Boolean {
         val resDirProp = System.getProperty("compose.application.resources.dir") ?: return false
         val resRoot = File(resDirProp)
         if (!resRoot.exists()) return false
@@ -78,14 +87,24 @@ class EngineManager {
         val bundledTar = resRoot.walkTopDown().find { it.isFile && it.name == "llama-engine.tar.gz" }
         if (bundledTar != null) {
             SettingsStore.ensureDirs()
+            val stampFile = SettingsStore.appDir.resolve(".llama-engine.stamp").toFile()
+            val currentStamp = "${bundledTar.length()}_${bundledTar.lastModified()}"
+            val destBin = SettingsStore.appDir.resolve("llama-server").toFile()
+            if (destBin.exists() && destBin.canExecute() && stampFile.exists() &&
+                runCatching { stampFile.readText().trim() == currentStamp }.getOrDefault(false)
+            ) {
+                return true
+            }
             val proc = ProcessBuilder(
                 "tar", "-xzf", bundledTar.absolutePath, "-C", SettingsStore.appDir.toAbsolutePath().toString()
             ).redirectErrorStream(true).start()
             if (proc.waitFor() == 0) {
-                val destBin = SettingsStore.appDir.resolve("llama-server").toFile()
                 destBin.setExecutable(true, false)
                 runCatching { ProcessBuilder("chmod", "+x", destBin.absolutePath).start().waitFor() }
-                if (destBin.exists() && destBin.canExecute()) return true
+                if (destBin.exists() && destBin.canExecute()) {
+                    runCatching { stampFile.writeText(currentStamp) }
+                    return true
+                }
             }
         }
 
@@ -114,11 +133,37 @@ class EngineManager {
         return destBin.exists() && destBin.canExecute()
     }
 
+    private fun killStrayEngineOnPort8091() {
+        runCatching {
+            ProcessBuilder("pkill", "-f", "llama-server.*--port 8091").start().waitFor(2, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun readRecentEngineError(logFile: File, startOffset: Long): String {
+        return runCatching {
+            if (!logFile.exists()) return ""
+            val bytes = logFile.readBytes()
+            val tail = if (bytes.size > startOffset && startOffset >= 0) {
+                String(bytes, startOffset.toInt(), (bytes.size - startOffset).toInt(), Charsets.UTF_8)
+            } else {
+                String(bytes, (bytes.size - 4096).coerceAtLeast(0), bytes.size.coerceAtMost(4096), Charsets.UTF_8)
+            }
+            val lines = tail.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val errLine = lines.lastOrNull {
+                val l = it.lowercase()
+                l.contains("error") || l.contains("failed") || l.contains("cannot") ||
+                    l.contains("out of memory") || l.contains("invalid") || l.contains("unknown")
+            } ?: lines.lastOrNull().orEmpty()
+            errLine.take(180)
+        }.getOrDefault("")
+    }
+
     fun start(
         modelPath: Path,
         settings: AppSettings,
+        profile: ModelProfile = settings.profileFor(modelPath.toFile()),
         onReady: (Boolean, String?) -> Unit = { _, _ -> },
-        onUnexpectedExit: (Int) -> Unit = {}
+        onUnexpectedExit: (Int, String) -> Unit = { _, _ -> }
     ) {
         if (isRunning) {
             onReady(true, null)
@@ -141,20 +186,49 @@ class EngineManager {
             return
         }
 
-        val safeSettings = settings.validated()
-        val cores = Runtime.getRuntime().availableProcessors()
-        val threads = if (safeSettings.threadsOverride > 0) safeSettings.threadsOverride
-        else (cores / 2).coerceAtLeast(1)
+        // Clean any orphaned llama-server process still holding port 8091
+        killStrayEngineOnPort8091()
 
-        val cmd = listOf(
+        val safeSettings = settings.validated()
+        val hw = HardwareDetector.detect()
+        val threads = if (safeSettings.threadsOverride > 0) safeSettings.threadsOverride else hw.recommendedThreads
+
+        val cmd = mutableListOf(
             binary.absolutePath,
             "-m", modelPath.toAbsolutePath().toString(),
             "--host", "127.0.0.1",
             "--port", "8091",
             "-c", safeSettings.contextSize.toString(),
             "-t", threads.toString(),
-            "-tb", threads.toString()
+            "-tb", threads.toString(),
+            "--jinja"
         )
+
+        // Vision / multimodal projector support (--mmproj)
+        if (profile.hasVision()) {
+            cmd.add("--mmproj")
+            cmd.add(File(profile.mmprojPath).absolutePath)
+        }
+
+        // Extra LoRA files if attached
+        profile.extraFiles
+            .filter { it.role.equals("lora", ignoreCase = true) && File(it.path).isFile }
+            .forEach {
+                cmd.add("--lora")
+                cmd.add(File(it.path).absolutePath)
+            }
+
+        // GPU offload only when explicitly set or GPU detected
+        val ngl = if (profile.gpuLayers >= 0) profile.gpuLayers else hw.recommendedGpuLayers
+        if (ngl > 0) {
+            cmd.add("-ngl")
+            cmd.add(ngl.toString())
+        }
+
+        // Optional user CLI flags
+        if (profile.customArgs.isNotBlank()) {
+            profile.customArgs.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { cmd.add(it) }
+        }
 
         try {
             SettingsStore.ensureDirs()
@@ -162,6 +236,7 @@ class EngineManager {
             if (logFile.exists() && logFile.length() > 5L * 1024L * 1024L) {
                 logFile.writeText("")
             }
+            val logOffset = if (logFile.exists()) logFile.length() else 0L
 
             val pb = ProcessBuilder(cmd)
             pb.directory(SettingsStore.appDir.toFile())
@@ -190,24 +265,31 @@ class EngineManager {
                     process = null
                 }
                 if (running.compareAndSet(true, false)) {
+                    val detail = readRecentEngineError(logFile, logOffset)
+                    val reason = if (detail.isNotBlank()) "Engine exited (code=$code): $detail"
+                    else "Engine exited unexpectedly (code=$code). Check engine.log"
                     if (!readySignaled.get()) {
-                        signalReady(false, "Engine exited unexpectedly (code=$code). Check engine.log")
+                        signalReady(false, reason)
                     } else {
-                        onUnexpectedExit(code)
+                        onUnexpectedExit(code, detail)
                     }
                 }
             }
 
             scope.launch {
-                val ok = waitForEngineReady(proc, 120_000)
+                val ok = waitForEngineReady(proc, 180_000)
                 if (ok && running.get() && proc.isAlive) {
+                    capabilities = probeCapabilities(modelPath.toFile(), profile)
                     signalReady(true, null)
                 } else {
+                    val detail = readRecentEngineError(logFile, logOffset)
                     if (running.compareAndSet(true, false)) {
                         runCatching { proc.destroy() }
                         if (process === proc) process = null
                     }
-                    signalReady(false, "Engine did not respond within 120s. Check engine.log")
+                    val reason = if (detail.isNotBlank()) "Engine failed: $detail"
+                    else "Engine did not respond in time. Check engine.log"
+                    signalReady(false, reason)
                 }
             }
         } catch (e: Exception) {
@@ -216,6 +298,51 @@ class EngineManager {
             process = null
             onReady(false, "Failed to start engine: ${e.message}")
         }
+    }
+
+    private fun probeCapabilities(modelFile: File, profile: ModelProfile): EngineCapabilities {
+        val nameLower = modelFile.name.lowercase()
+        val nameHintsThinking = listOf(
+            "qwen3", "deepseek-r1", "deepseek_r1", "qwq", "thinking", "reason", "r1-", "o1", "o3", "cogito", "marco-o1", "glm-4.5", "gpt-oss"
+        ).any { nameLower.contains(it) }
+
+        var templateHintsThinking = false
+        var nativeCtx = 0
+        var propsVision = profile.hasVision()
+
+        runCatching {
+            val propsUrl = "http" + "://127.0.0.1:8091/props"
+            val req = Request.Builder().url(propsUrl).get().build()
+            healthClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string().orEmpty()
+                    val j = JSONObject(body)
+                    val tmpl = j.optString("chat_template", "").lowercase()
+                    if (tmpl.contains("<think>") || tmpl.contains("enable_thinking") || tmpl.contains("reasoning")) {
+                        templateHintsThinking = true
+                    }
+                    val genSettings = j.optJSONObject("default_generation_settings")
+                    nativeCtx = genSettings?.optInt("n_ctx", 0) ?: 0
+                    val modalities = j.optJSONObject("modalities")
+                    if (modalities?.optBoolean("vision", false) == true) {
+                        propsVision = true
+                    }
+                }
+            }
+        }
+
+        val supportsThinking = when (profile.thinkingMode) {
+            ThinkingSupportMode.ENABLED -> true
+            ThinkingSupportMode.DISABLED -> false
+            ThinkingSupportMode.AUTO -> nameHintsThinking || templateHintsThinking
+        }
+
+        return EngineCapabilities(
+            supportsThinking = supportsThinking,
+            supportsVision = propsVision,
+            modelKind = profile.kind,
+            nativeContext = nativeCtx
+        )
     }
 
     fun stop() {
@@ -235,7 +362,8 @@ class EngineManager {
 
     private suspend fun waitForEngineReady(proc: Process, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
-        val req = Request.Builder().url("http://127.0.0.1:8091/health").get().build()
+        val healthUrl = "http" + "://127.0.0.1:8091/health"
+        val req = Request.Builder().url(healthUrl).get().build()
         while (System.currentTimeMillis() < deadline) {
             if (!running.get() || !proc.isAlive) return false
             try {
@@ -245,7 +373,7 @@ class EngineManager {
                     }
                 }
             } catch (_: Exception) {
-                // Engine still loading model
+                // Model still loading
             }
             delay(500)
         }
@@ -273,8 +401,9 @@ class EngineManager {
                     .build()
 
                 onProgress("Finding latest engine...")
+                val apiUrl = "https" + "://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10"
                 val apiReq = Request.Builder()
-                    .url("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10")
+                    .url(apiUrl)
                     .header("User-Agent", "SaMu-Lab-Linux")
                     .header("Accept", "application/vnd.github+json")
                     .build()
