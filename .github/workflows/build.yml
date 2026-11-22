@@ -166,11 +166,10 @@ jobs:
           }
 
       - name: Bundle latest llama-server.exe (Windows x64)
-        shell: pwsh
+        shell: python
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python - << 'PYEOF'
           import json, os, shutil, tempfile, urllib.request, zipfile
           from pathlib import Path
 
@@ -231,7 +230,6 @@ jobs:
                       if item.is_file() and (item.name.lower() == "llama-server.exe" or item.name.lower().endswith(".dll")):
                           oz.write(item, arcname=item.name)
               print(f"Bundled Windows engine: {out_zip} ({out_zip.stat().st_size / (1024*1024):.1f} MB)")
-          PYEOF
 
       - name: Build Windows MSI & Portable App
         shell: pwsh
