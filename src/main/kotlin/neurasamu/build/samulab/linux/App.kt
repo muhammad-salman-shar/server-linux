@@ -1,6 +1,14 @@
 package neurasamu.build.samulab.linux
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,588 +20,53 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Science
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.jetbrains.skia.Image as SkiaImage
 import java.io.File
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.nio.file.Files
-import java.nio.file.Path
-import java.util.Locale
 
-private val DarkColors = darkColorScheme(
-    primary = Color(0xFF7C4DFF),
-    onPrimary = Color.White,
-    surface = Color(0xFF121212),
-    onSurface = Color(0xFFE6E6E6),
-    background = Color(0xFF0D0D0D),
-    onBackground = Color(0xFFE6E6E6),
-    surfaceVariant = Color(0xFF1E1E1E),
-    onSurfaceVariant = Color(0xFFB0B0B0),
-    error = Color(0xFFEF5350)
-)
+enum class MainTab { CHAT, SERVER }
 
-@Composable
-fun App() {
-    MaterialTheme(colorScheme = DarkColors) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.background
-        ) {
-            DashboardScreen()
-        }
-    }
-}
-
-@Composable
-private fun DashboardScreen() {
-    var settings by remember { mutableStateOf(SettingsStore.load()) }
-    val engine = remember { EngineManager() }
-    var apiServer by remember { mutableStateOf<ApiServer?>(null) }
-    var serverRunning by remember { mutableStateOf(false) }
-    var isStarting by remember { mutableStateOf(false) }
-    var models by remember { mutableStateOf(scanModels(settings.modelPaths)) }
-    var loadedModelPath by remember { mutableStateOf<String?>(models.firstOrNull()?.absolutePath) }
-    var showSettings by remember { mutableStateOf(false) }
-    var statusMessage by remember { mutableStateOf<String?>(null) }
-    var isStatusError by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    val localIp = remember { getLocalIp() }
-    val displayHost = if (settings.lanAccess) localIp else "127.0.0.1"
-    val apiBaseUrl = "http://$displayHost:${settings.port}/v1"
-
-    fun setStatus(msg: String?, error: Boolean = false) {
-        statusMessage = msg
-        isStatusError = error
-    }
-
-    fun stopAll(clearModel: Boolean = false) {
-        runCatching { apiServer?.stop() }
-        apiServer = null
-        engine.stop()
-        serverRunning = false
-        isStarting = false
-        if (clearModel) loadedModelPath = null
-    }
-
-    fun startWithModel(modelFile: File) {
-        if (isStarting) return
-        if (!modelFile.exists()) {
-            setStatus("Model file not found on disk: ${modelFile.name}", error = true)
-            return
-        }
-        loadedModelPath = modelFile.absolutePath
-        isStarting = true
-        setStatus("Preparing ${modelFile.name}...", error = false)
-
-        engine.ensureEngineAndStart(
-            modelPath = modelFile.toPath(),
-            settings = settings,
-            onProgress = { msg ->
-                scope.launch(Dispatchers.Main) {
-                    setStatus(msg, error = false)
-                }
-            },
-            onReady = { ok, err ->
-                scope.launch(Dispatchers.Main) {
-                    isStarting = false
-                    if (ok) {
-                        try {
-                            runCatching { apiServer?.stop() }
-                            apiServer = ApiServer({ settings }, engine).also { it.start() }
-                            serverRunning = true
-                            setStatus("Running! Connect any device using $apiBaseUrl", error = false)
-                        } catch (e: Exception) {
-                            engine.stop()
-                            apiServer = null
-                            serverRunning = false
-                            setStatus("API server failed to start: ${e.message}", error = true)
-                        }
-                    } else {
-                        serverRunning = false
-                        setStatus(err ?: "Engine failed to start", error = true)
-                    }
-                }
-            },
-            onUnexpectedExit = { code ->
-                scope.launch(Dispatchers.Main) {
-                    runCatching { apiServer?.stop() }
-                    apiServer = null
-                    serverRunning = false
-                    isStarting = false
-                    setStatus("Engine stopped unexpectedly (code $code). Check engine.log", error = true)
-                }
-            }
-        )
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching { apiServer?.stop() }
-            engine.shutdown()
-        }
-    }
-
-    Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                Icons.Filled.Science,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(28.dp)
-            )
-            Spacer(Modifier.width(10.dp))
-            Text("SaMu Lab", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = { showSettings = true }) {
-                Icon(Icons.Filled.Settings, contentDescription = "Settings")
-            }
-        }
-
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            ),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val dotColor = when {
-                        serverRunning -> Color(0xFF4CAF50)
-                        isStarting -> Color(0xFFFFB300)
-                        else -> Color(0xFFF44336)
-                    }
-                    val statusLabel = when {
-                        serverRunning -> "Server Running"
-                        isStarting -> "Starting..."
-                        else -> "Server Stopped"
-                    }
-                    Box(
-                        modifier = Modifier.size(12.dp).background(dotColor, CircleShape)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(statusLabel, fontWeight = FontWeight.SemiBold)
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                OutlinedTextField(
-                    value = settings.modelApiName,
-                    onValueChange = {
-                        settings = settings.copy(modelApiName = it)
-                        SettingsStore.save(settings)
-                    },
-                    label = { Text("Model Name (API)") },
-                    singleLine = true,
-                    trailingIcon = {
-                        IconButton(onClick = {
-                            copyToClipboard(settings.modelApiName)
-                            setStatus("Model name copied!", error = false)
-                        }) {
-                            Icon(
-                                Icons.Filled.ContentCopy,
-                                contentDescription = "Copy Model Name",
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(Modifier.height(10.dp))
-
-                InfoRow(if (settings.lanAccess) "API URL" else "Local URL", apiBaseUrl)
-                InfoRow("Model Name", settings.modelApiName)
-                if (settings.requireAuth) {
-                    InfoRow("API Key", settings.apiKey)
-                }
-
-                statusMessage?.let { msg ->
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        msg,
-                        color = if (isStatusError) MaterialTheme.colorScheme.error else Color(0xFF81C784),
-                        fontSize = 12.sp
-                    )
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            copyToClipboard(apiBaseUrl)
-                            setStatus("API URL copied!", error = false)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Copy URL") }
-
-                    OutlinedButton(
-                        onClick = {
-                            copyToClipboard(settings.modelApiName)
-                            setStatus("Model name copied!", error = false)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Copy Model") }
-
-                    OutlinedButton(
-                        onClick = {
-                            copyToClipboard(settings.apiKey)
-                            setStatus("API key copied!", error = false)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Copy Key") }
-                }
-
-                Spacer(Modifier.height(10.dp))
-
-                Button(
-                    onClick = {
-                        if (serverRunning || isStarting) {
-                            stopAll(clearModel = false)
-                            setStatus("Server stopped.", error = false)
-                        } else {
-                            val selected = models.find { it.absolutePath == loadedModelPath }
-                                ?: models.firstOrNull()
-                            if (selected == null) {
-                                setStatus("Please add a .gguf model first using the + button.", error = true)
-                                return@Button
-                            }
-                            startWithModel(selected)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (serverRunning || isStarting) Color(0xFFD32F2F)
-                        else MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text(
-                        when {
-                            isStarting -> "Stop / Cancel"
-                            serverRunning -> "Stop Server"
-                            else -> "Start Server"
-                        }
-                    )
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-        Text(
-            "Models",
-            modifier = Modifier.padding(horizontal = 20.dp),
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(Modifier.height(8.dp))
-
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (models.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "No models yet. Click + below to pick a .gguf file from storage.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    items(models, key = { it.absolutePath }) { file ->
-                        ModelRow(
-                            file = file,
-                            isLoaded = loadedModelPath == file.absolutePath,
-                            isRunning = serverRunning && loadedModelPath == file.absolutePath,
-                            onLoad = {
-                                if (serverRunning) {
-                                    stopAll(clearModel = false)
-                                    startWithModel(file)
-                                } else {
-                                    loadedModelPath = file.absolutePath
-                                    setStatus("Loaded ${file.name}. Click Start Server.", error = false)
-                                }
-                            },
-                            onDelete = {
-                                if (loadedModelPath == file.absolutePath) {
-                                    stopAll(clearModel = true)
-                                }
-                                val updatedPaths = settings.modelPaths.filterNot {
-                                    File(it).absoluteFile.normalize().path == file.absoluteFile.normalize().path
-                                }
-                                settings = settings.copy(modelPaths = updatedPaths)
-                                SettingsStore.save(settings)
-
-                                scope.launch(Dispatchers.IO) {
-                                    val modelsDirPath = SettingsStore.modelsDir().toAbsolutePath().normalize()
-                                    val filePath = file.toPath().toAbsolutePath().normalize()
-                                    if (filePath.startsWith(modelsDirPath)) {
-                                        runCatching { Files.deleteIfExists(filePath) }
-                                    }
-                                    val fresh = scanModels(updatedPaths)
-                                    withContext(Dispatchers.Main) {
-                                        models = fresh
-                                        if (loadedModelPath == null) {
-                                            loadedModelPath = fresh.firstOrNull()?.absolutePath
-                                        }
-                                        setStatus("Removed ${file.name} from list.", error = false)
-                                    }
-                                }
-                            }
-                        )
-                    }
-                }
-            }
-
-            FloatingActionButton(
-                onClick = {
-                    val picked = runCatching { openGgufPicker() }.getOrNull() ?: return@FloatingActionButton
-                    val dir = picked.first
-                    val name = picked.second
-                    if (dir != null && name != null) {
-                        val pickedFile = File(dir, name).absoluteFile.normalize()
-                        if (!pickedFile.exists()) {
-                            setStatus("Selected file not found.", error = true)
-                            return@FloatingActionButton
-                        }
-                        val updatedPaths = (settings.modelPaths + pickedFile.path).distinct()
-                        settings = settings.copy(modelPaths = updatedPaths)
-                        SettingsStore.save(settings)
-                        models = scanModels(updatedPaths)
-                        loadedModelPath = pickedFile.path
-                        setStatus("Loaded ${pickedFile.name}. Click Start Server.", error = false)
-                    }
-                },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-                containerColor = MaterialTheme.colorScheme.primary
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "Add Model")
-            }
-        }
-    }
-
-    if (showSettings) {
-        SettingsDialog(
-            settings = settings,
-            onDismiss = { showSettings = false },
-            onSave = { updated ->
-                val safe = updated.validated()
-                settings = safe
-                SettingsStore.save(safe)
-                showSettings = false
-                if (serverRunning) {
-                    setStatus("Settings saved. Restart server to apply port/LAN/context changes.", error = false)
-                } else {
-                    setStatus("Settings saved.", error = false)
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            "$label: ",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 13.sp
-        )
-        Text(
-            value,
-            color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace
-        )
-    }
-}
-
-@Composable
-private fun ModelRow(
-    file: File,
-    isLoaded: Boolean,
-    isRunning: Boolean,
-    onLoad: () -> Unit,
-    onDelete: () -> Unit
-) {
-    val mb = file.length() / (1024.0 * 1024.0)
-    val sizeText = if (mb >= 1024) String.format(Locale.US, "%.2f GB", mb / 1024.0)
-    else String.format(Locale.US, "%.0f MB", mb)
-
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = if (isLoaded)
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-            else MaterialTheme.colorScheme.surfaceVariant
-        ),
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                Icons.Filled.Storage,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(22.dp)
-            )
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    file.name,
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 14.sp
-                )
-                Text(
-                    sizeText,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp
-                )
-            }
-            if (isLoaded) {
-                Text(
-                    if (isRunning) "RUNNING" else "LOADED",
-                    color = if (isRunning) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(end = 8.dp)
-                )
-            } else {
-                TextButton(onClick = onLoad) { Text("Load") }
-            }
-            IconButton(onClick = onDelete) {
-                Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = "Remove",
-                    tint = Color(0xFFEF5350),
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsDialog(
-    settings: AppSettings,
-    onDismiss: () -> Unit,
-    onSave: (AppSettings) -> Unit
-) {
-    var port by remember { mutableStateOf(settings.port.toString()) }
-    var lan by remember { mutableStateOf(settings.lanAccess) }
-    var threads by remember { mutableStateOf(settings.threadsOverride.toString()) }
-    var ctx by remember { mutableStateOf(settings.contextSize.toString()) }
-    var auth by remember { mutableStateOf(settings.requireAuth) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Settings") },
-        text = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { port = it.filter(Char::isDigit) },
-                    label = { Text("Port (1024-65535)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("LAN Access", modifier = Modifier.weight(1f))
-                    Switch(checked = lan, onCheckedChange = { lan = it })
-                }
-                OutlinedTextField(
-                    value = threads,
-                    onValueChange = { threads = it.filter(Char::isDigit) },
-                    label = { Text("Threads (0 = Auto)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = ctx,
-                    onValueChange = { ctx = it.filter(Char::isDigit) },
-                    label = { Text("Context Size (512-131072)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Require API Key", modifier = Modifier.weight(1f))
-                    Switch(checked = auth, onCheckedChange = { auth = it })
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                onSave(
-                    settings.copy(
-                        port = port.toIntOrNull() ?: 8080,
-                        lanAccess = lan,
-                        threadsOverride = threads.toIntOrNull() ?: 0,
-                        contextSize = ctx.toIntOrNull() ?: 4096,
-                        requireAuth = auth
-                    ).validated()
-                )
-            }) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
+enum class ShortcutAction {
+    NEW_CHAT,
+    OPEN_SETTINGS,
+    EDIT_LAST_USER,
+    REGENERATE_LAST,
+    CLEAR_CHAT,
+    CLOSE_MODALS
 }
 
 private fun scanModels(savedPaths: List<String>): List<File> {
@@ -606,31 +79,752 @@ private fun scanModels(savedPaths: List<String>): List<File> {
         .sortedBy { it.name.lowercase() }
 }
 
-private fun getLocalIp(): String {
-    return runCatching {
-        NetworkInterface.getNetworkInterfaces().toList()
-            .asSequence()
-            .filter { it.isUp && !it.isLoopback }
-            .flatMap { it.inetAddresses.toList().asSequence() }
-            .filterIsInstance<Inet4Address>()
-            .firstOrNull()?.hostAddress
-    }.getOrNull() ?: "127.0.0.1"
-}
+@Composable
+fun App(shortcuts: SharedFlow<ShortcutAction>) {
+    var chatPrefs by remember { mutableStateOf(ChatStore.loadPrefs()) }
 
-private fun copyToClipboard(text: String) {
-    runCatching {
-        val sel = java.awt.datatransfer.StringSelection(text)
-        java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(sel, sel)
+    SaMuTheme(themeMode = chatPrefs.themeMode, fontScale = chatPrefs.fontScale) {
+        val palette = LocalSaMuColors.current
+        Surface(modifier = Modifier.fillMaxSize(), color = palette.background) {
+            SaMuLabRoot(
+                chatPrefs = chatPrefs,
+                onUpdatePrefs = { updated ->
+                    chatPrefs = updated
+                    ChatStore.savePrefs(updated)
+                },
+                shortcuts = shortcuts
+            )
+        }
     }
 }
 
-private fun openGgufPicker(): Pair<String?, String?> {
-    val dialog = java.awt.FileDialog(
-        null as java.awt.Frame?,
-        "Select GGUF Model",
-        java.awt.FileDialog.LOAD
-    )
-    dialog.setFilenameFilter { _, name -> name.lowercase().endsWith(".gguf") }
-    dialog.isVisible = true
-    return dialog.directory to dialog.file
+@Composable
+private fun SaMuLabRoot(
+    chatPrefs: ChatPrefs,
+    onUpdatePrefs: (ChatPrefs) -> Unit,
+    shortcuts: SharedFlow<ShortcutAction>
+) {
+    val palette = LocalSaMuColors.current
+    val scope = rememberCoroutineScope()
+
+    var activeTab by remember { mutableStateOf(MainTab.CHAT) }
+
+    // --- Shared Live Server State (stays alive across tabs) ---
+    var serverSettings by remember { mutableStateOf(SettingsStore.load()) }
+    val engine = remember { EngineManager() }
+    val monitor = remember { ServerMonitor() }
+    val telemetry by monitor.state.collectAsState()
+    var apiServer by remember { mutableStateOf<ApiServer?>(null) }
+    var serverRunning by remember { mutableStateOf(false) }
+    var isStarting by remember { mutableStateOf(false) }
+    var localIp by remember { mutableStateOf(getLocalIp()) }
+    var models by remember { mutableStateOf(scanModels(serverSettings.modelPaths)) }
+    var loadedModelPath by remember { mutableStateOf<String?>(models.firstOrNull()?.absolutePath) }
+    var serverStatusMsg by remember { mutableStateOf<String?>(null) }
+    var serverStatusErr by remember { mutableStateOf(false) }
+
+    // Periodically refresh local IP when Wi-Fi/Hotspot connects or changes
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5000)
+            val latest = withContext(Dispatchers.IO) { getLocalIp() }
+            if (latest != localIp) localIp = latest
+        }
+    }
+
+    // --- Shared Live Chat State (stays alive across tabs) ---
+    val chatClient = remember { ChatClient() }
+    val ttsPlayer = remember { LinuxTtsPlayer() }
+    var speakingMsgId by remember { mutableStateOf<String?>(null) }
+
+    var customApis by remember { mutableStateOf(ChatStore.loadApis()) }
+    val builtInLocalApi = remember(serverSettings.port, serverSettings.modelApiName, serverSettings.requireAuth, serverSettings.apiKey) {
+        ApiConfig(
+            id = LOCAL_SAMU_API_ID,
+            label = "SaMu Lab (Local)",
+            baseUrl = "[http://127.0.0.1](http://127.0.0.1):${serverSettings.port}/v1",
+            modelName = serverSettings.modelApiName,
+            apiKey = if (serverSettings.requireAuth) serverSettings.apiKey else "",
+            isBuiltInLocal = true
+        )
+    }
+    val allApis = remember(builtInLocalApi, customApis) { listOf(builtInLocalApi) + customApis }
+    val activeApi = remember(allApis, chatPrefs.activeApiId) {
+        allApis.firstOrNull { it.id == chatPrefs.activeApiId } ?: allApis.firstOrNull()
+    }
+
+    var chats by remember {
+        mutableStateOf(
+            ChatStore.loadChats().ifEmpty { listOf(ChatSession(title = "New Chat")) }
+        )
+    }
+    var activeChatId by remember {
+        mutableStateOf(
+            chats.firstOrNull { it.id == chatPrefs.activeChatId }?.id ?: chats.first().id
+        )
+    }
+    val activeChat = chats.firstOrNull { it.id == activeChatId } ?: chats.first()
+
+    var inputText by remember { mutableStateOf("") }
+    var attachments by remember { mutableStateOf<List<ChatAttachment>>(emptyList()) }
+    var isStreaming by remember { mutableStateOf(false) }
+    var streamingText by remember { mutableStateOf("") }
+    var streamingChatId by remember { mutableStateOf<String?>(null) }
+
+    // Modals & Toast
+    var showApiModal by remember { mutableStateOf(false) }
+    var editingApi by remember { mutableStateOf<ApiConfig?>(null) }
+    var showChatSettingsModal by remember { mutableStateOf(false) }
+    var lightboxAttachment by remember { mutableStateOf<ChatAttachment?>(null) }
+    var renamingChat by remember { mutableStateOf<ChatSession?>(null) }
+    var deletingChat by remember { mutableStateOf<ChatSession?>(null) }
+    var deletingApi by remember { mutableStateOf<ApiConfig?>(null) }
+    var toastMsg by remember { mutableStateOf<String?>(null) }
+
+    fun showToast(msg: String) {
+        toastMsg = msg
+        scope.launch {
+            delay(2000)
+            if (toastMsg == msg) toastMsg = null
+        }
+    }
+
+    fun persistChats(updated: List<ChatSession>) {
+        chats = updated
+        ChatStore.saveChats(updated)
+    }
+
+    fun updateChatById(chatId: String, transform: (ChatSession) -> ChatSession) {
+        val updated = chats.map { if (it.id == chatId) transform(it) else it }
+        persistChats(updated)
+    }
+
+    // --- Server Controls ---
+    fun setServerStatus(msg: String?, error: Boolean = false) {
+        serverStatusMsg = msg
+        serverStatusErr = error
+    }
+
+    fun stopServer(clearModel: Boolean = false) {
+        runCatching { apiServer?.stop() }
+        apiServer = null
+        engine.stop()
+        serverRunning = false
+        isStarting = false
+        monitor.resetSession()
+        monitor.log("INFO", "Server stopped")
+        if (clearModel) loadedModelPath = null
+    }
+
+    fun startServerWithModel(modelFile: File) {
+        if (isStarting) return
+        if (!modelFile.exists()) {
+            setServerStatus("Model file not found: ${modelFile.name}", error = true)
+            return
+        }
+        localIp = getLocalIp()
+        loadedModelPath = modelFile.absolutePath
+        isStarting = true
+        setServerStatus("Preparing ${modelFile.name}...", error = false)
+        monitor.log("INFO", "Starting model ${modelFile.name}")
+
+        engine.ensureEngineAndStart(
+            modelPath = modelFile.toPath(),
+            settings = serverSettings,
+            onProgress = { msg ->
+                scope.launch(Dispatchers.Main) {
+                    setServerStatus(msg, error = false)
+                }
+            },
+            onReady = { ok, err ->
+                scope.launch(Dispatchers.Main) {
+                    isStarting = false
+                    if (ok) {
+                        try {
+                            runCatching { apiServer?.stop() }
+                            localIp = getLocalIp()
+                            apiServer = ApiServer({ serverSettings }, engine, monitor).also { it.start() }
+                            serverRunning = true
+                            monitor.markReady()
+                            val host = if (serverSettings.lanAccess) localIp else "127.0.0.1"
+                            setServerStatus("Running on http://$host:${serverSettings.port}/v1", error = false)
+                        } catch (e: Exception) {
+                            engine.stop()
+                            apiServer = null
+                            serverRunning = false
+                            monitor.log("ERR", "API server bind failed: ${e.message}")
+                            setServerStatus("API server failed: ${e.message}", error = true)
+                        }
+                    } else {
+                        serverRunning = false
+                        monitor.log("ERR", err ?: "Engine failed")
+                        setServerStatus(err ?: "Engine failed to start", error = true)
+                    }
+                }
+            },
+            onUnexpectedExit = { code ->
+                scope.launch(Dispatchers.Main) {
+                    runCatching { apiServer?.stop() }
+                    apiServer = null
+                    serverRunning = false
+                    isStarting = false
+                    monitor.resetSession()
+                    monitor.log("ERR", "Engine crashed (exit $code)")
+                    setServerStatus("Engine exited unexpectedly (code $code). Check engine.log", error = true)
+                }
+            }
+        )
+    }
+
+    // --- Chat Controls ---
+    fun runAssistantForChat(chatId: String, history: List<ChatMessage>) {
+        val api = activeApi
+        if (api == null) {
+            showToast("Please select or add an API first.")
+            return
+        }
+        if (api.isBuiltInLocal && !serverRunning) {
+            updateChatById(chatId) { c ->
+                c.copy(
+                    messages = c.messages + ChatMessage(
+                        role = "assistant",
+                        content = "Local SaMu Lab server is stopped. Switch to the Server tab and click Start Server.",
+                        isError = true
+                    )
+                )
+            }
+            return
+        }
+
+        isStreaming = true
+        streamingText = ""
+        streamingChatId = chatId
+
+        val globalInstr = if (chatPrefs.customInstructionsEnabled) chatPrefs.customInstructions else null
+        scope.launch(Dispatchers.IO) {
+            chatClient.streamChat(
+                api = api,
+                history = history,
+                globalInstructions = globalInstr,
+                onDelta = { partial ->
+                    scope.launch(Dispatchers.Main) {
+                        streamingText = partial
+                    }
+                },
+                onComplete = { fullText, _, err ->
+                    scope.launch(Dispatchers.Main) {
+                        isStreaming = false
+                        streamingText = ""
+                        streamingChatId = null
+                        val replyMsg = if (err != null && fullText.isBlank()) {
+                            ChatMessage(role = "assistant", content = err, isError = true)
+                        } else if (fullText.isNotBlank()) {
+                            ChatMessage(role = "assistant", content = fullText)
+                        } else {
+                            ChatMessage(role = "assistant", content = "Empty response from model.", isError = true)
+                        }
+                        updateChatById(chatId) { c ->
+                            c.copy(messages = c.messages + replyMsg, updatedAt = System.currentTimeMillis())
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    fun sendCurrentMessage() {
+        val trimmed = inputText.trim()
+        if ((trimmed.isEmpty() && attachments.isEmpty()) || isStreaming) return
+        val targetChat = activeChat
+        val userMsg = ChatMessage(
+            role = "user",
+            content = trimmed,
+            attachments = attachments
+        )
+        val isFirst = targetChat.messages.isEmpty()
+        val autoTitle = if (isFirst && trimmed.isNotBlank()) {
+            if (trimmed.length > 40) trimmed.take(40) + "..." else trimmed
+        } else targetChat.title
+
+        val newHistory = targetChat.messages + userMsg
+        updateChatById(targetChat.id) { c ->
+            c.copy(title = autoTitle, messages = newHistory, updatedAt = System.currentTimeMillis())
+        }
+        inputText = ""
+        attachments = emptyList()
+        runAssistantForChat(targetChat.id, newHistory)
+    }
+
+    fun createNewChat() {
+        val fresh = ChatSession(title = "New Chat")
+        persistChats(listOf(fresh) + chats)
+        activeChatId = fresh.id
+        onUpdatePrefs(chatPrefs.copy(activeChatId = fresh.id))
+        activeTab = MainTab.CHAT
+    }
+
+    fun editMessage(msg: ChatMessage) {
+        if (isStreaming) chatClient.abort()
+        val idx = activeChat.messages.indexOfFirst { it.id == msg.id }
+        if (idx < 0) return
+        inputText = msg.content
+        attachments = msg.attachments
+        updateChatById(activeChat.id) { c -> c.copy(messages = c.messages.take(idx)) }
+    }
+
+    fun regenerateFrom(msg: ChatMessage) {
+        if (isStreaming) return
+        val idx = activeChat.messages.indexOfFirst { it.id == msg.id }
+        if (idx < 0) return
+        val trimmedHistory = activeChat.messages.take(idx)
+        updateChatById(activeChat.id) { c -> c.copy(messages = trimmedHistory) }
+        if (trimmedHistory.isNotEmpty()) {
+            runAssistantForChat(activeChat.id, trimmedHistory)
+        }
+    }
+
+    val latestActiveChat by rememberUpdatedState(activeChat)
+    val latestNewChat by rememberUpdatedState(::createNewChat)
+    val latestEditMsg by rememberUpdatedState(::editMessage)
+    val latestRegenMsg by rememberUpdatedState(::regenerateFrom)
+
+    // Handle Desktop Keyboard Shortcuts
+    LaunchedEffect(shortcuts) {
+        shortcuts.collect { action ->
+            when (action) {
+                ShortcutAction.NEW_CHAT -> latestNewChat()
+                ShortcutAction.OPEN_SETTINGS -> showChatSettingsModal = true
+                ShortcutAction.EDIT_LAST_USER -> {
+                    latestActiveChat.messages.lastOrNull { it.role == "user" }?.let { latestEditMsg(it) }
+                }
+                ShortcutAction.REGENERATE_LAST -> {
+                    latestActiveChat.messages.lastOrNull { it.role == "assistant" }?.let { latestRegenMsg(it) }
+                }
+                ShortcutAction.CLEAR_CHAT -> {
+                    if (isStreaming) chatClient.abort()
+                    updateChatById(latestActiveChat.id) { it.copy(messages = emptyList(), title = "New Chat") }
+                    showToast("Chat cleared")
+                }
+                ShortcutAction.CLOSE_MODALS -> {
+                    showApiModal = false
+                    showChatSettingsModal = false
+                    lightboxAttachment = null
+                    renamingChat = null
+                    deletingChat = null
+                    deletingApi = null
+                }
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            ttsPlayer.stop()
+            chatClient.shutdown()
+            runCatching { apiServer?.stop() }
+            engine.shutdown()
+        }
+    }
+
+    val appIconBmp = remember {
+        runCatching {
+            Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")?.use {
+                SkiaImage.makeFromEncoded(it.readBytes()).toComposeImageBitmap()
+            }
+        }.getOrNull()
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // --- Global Top Header with Centered [ Chat | Server ] Switcher ---
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .background(palette.surface)
+                    .padding(horizontal = 14.dp)
+            ) {
+                // Left Brand
+                Row(
+                    modifier = Modifier.align(Alignment.CenterStart),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (appIconBmp != null) {
+                        Image(
+                            bitmap = appIconBmp,
+                            contentDescription = "SaMu Lab",
+                            modifier = Modifier.size(26.dp).clip(RoundedCornerShape(6.dp))
+                        )
+                    }
+                    Text(
+                        "SaMu Lab",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.onSurface
+                    )
+                }
+
+                // Exact Center Switcher: Chat | Server
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(palette.background)
+                        .border(1.dp, palette.divider, RoundedCornerShape(22.dp))
+                        .padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    TopTabPill(
+                        label = "Chat",
+                        icon = Icons.Filled.Forum,
+                        selected = activeTab == MainTab.CHAT,
+                        dotColor = if (isStreaming) palette.primary else null,
+                        onClick = { activeTab = MainTab.CHAT }
+                    )
+                    TopTabPill(
+                        label = "Server",
+                        icon = Icons.Filled.Dns,
+                        selected = activeTab == MainTab.SERVER,
+                        dotColor = when {
+                            serverRunning && telemetry.activeRequests > 0 -> palette.primary
+                            serverRunning -> palette.success
+                            isStarting -> palette.warning
+                            else -> null
+                        },
+                        onClick = { activeTab = MainTab.SERVER }
+                    )
+                }
+
+                // Right Quick Status & Theme Switch
+                Row(
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(palette.surfaceVariant)
+                            .clickable { activeTab = MainTab.SERVER }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .background(if (serverRunning) palette.success else palette.textTertiary, CircleShape)
+                            )
+                            Text(
+                                text = if (serverRunning) {
+                                    if (telemetry.activeRequests > 0) "Busy · ${String.format("%.1f", telemetry.liveTokensPerSec)} t/s"
+                                    else "Online :${serverSettings.port}"
+                                } else "Offline",
+                                fontSize = 11.sp,
+                                color = palette.textSecondary
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = {
+                            val next = if (palette.isDark) ThemeMode.LIGHT else ThemeMode.DARK
+                            onUpdatePrefs(chatPrefs.copy(themeMode = next))
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (palette.isDark) Icons.Filled.LightMode else Icons.Filled.DarkMode,
+                            contentDescription = "Toggle Theme",
+                            tint = palette.textSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+            // Active Tab Content (all state hoisted so neither screen dies on switch!)
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (activeTab) {
+                    MainTab.CHAT -> ChatScreen(
+                        allApis = allApis,
+                        activeApi = activeApi,
+                        localServerRunning = serverRunning,
+                        chats = chats,
+                        activeChat = activeChat,
+                        inputText = inputText,
+                        onInputChange = { inputText = it },
+                        attachments = attachments,
+                        onAddAttachment = { attachments = attachments + it },
+                        onRemoveAttachment = { att -> attachments = attachments.filterNot { it == att } },
+                        isStreaming = isStreaming && streamingChatId == activeChat.id,
+                        streamingText = if (streamingChatId == activeChat.id) streamingText else "",
+                        speakingMsgId = speakingMsgId,
+                        onSelectApi = { api -> onUpdatePrefs(chatPrefs.copy(activeApiId = api.id)) },
+                        onOpenAddApi = { editingApi = null; showApiModal = true },
+                        onOpenEditApi = { api -> editingApi = api; showApiModal = true },
+                        onRequestDeleteApi = { deletingApi = it },
+                        onNewChat = ::createNewChat,
+                        onSelectChat = { chat ->
+                            activeChatId = chat.id
+                            onUpdatePrefs(chatPrefs.copy(activeChatId = chat.id))
+                        },
+                        onRequestRenameChat = { renamingChat = it },
+                        onDownloadChat = { chat ->
+                            val transcript = buildString {
+                                appendLine("Chat: ${chat.title}")
+                                appendLine("=".repeat(40))
+                                appendLine()
+                                chat.messages.forEach { m ->
+                                    appendLine("[${m.role.uppercase()}]")
+                                    appendLine(m.content)
+                                    appendLine()
+                                }
+                            }
+                            val saved = saveTextFileDialog("${chat.title.replace(Regex("[^a-zA-Z0-9_-]"), "_")}.txt", transcript)
+                            if (saved != null) showToast("Saved to ${saved.name}")
+                        },
+                        onRequestDeleteChat = { deletingChat = it },
+                        onOpenChatSettings = { showChatSettingsModal = true },
+                        onSendMessage = ::sendCurrentMessage,
+                        onStopStreaming = { chatClient.abort() },
+                        onEditMessage = ::editMessage,
+                        onRegenerateMessage = ::regenerateFrom,
+                        onToggleReadAloud = { msg ->
+                            val err = ttsPlayer.toggle(msg.id, msg.content) { activeId ->
+                                scope.launch(Dispatchers.Main) { speakingMsgId = activeId }
+                            }
+                            if (err != null) showToast(err)
+                        },
+                        onOpenLightbox = { lightboxAttachment = it },
+                        onCopyToast = ::showToast,
+                        onSwitchToServerTab = { activeTab = MainTab.SERVER }
+                    )
+
+                    MainTab.SERVER -> ServerScreen(
+                        settings = serverSettings,
+                        localIp = localIp,
+                        serverRunning = serverRunning,
+                        isStarting = isStarting,
+                        models = models,
+                        loadedModelPath = loadedModelPath,
+                        statusMessage = serverStatusMsg,
+                        isStatusError = serverStatusErr,
+                        telemetry = telemetry,
+                        onRefreshIp = {
+                            localIp = getLocalIp()
+                            showToast("Network IP refreshed: $localIp")
+                        },
+                        onModelApiNameChange = { name ->
+                            serverSettings = serverSettings.copy(modelApiName = name)
+                            SettingsStore.save(serverSettings)
+                        },
+                        onStartOrStop = {
+                            if (serverRunning || isStarting) {
+                                stopServer(clearModel = false)
+                                setServerStatus("Server stopped.", error = false)
+                            } else {
+                                val selected = models.find { it.absolutePath == loadedModelPath } ?: models.firstOrNull()
+                                if (selected == null) {
+                                    setServerStatus("Please add a .gguf model first using the + button.", error = true)
+                                } else {
+                                    startServerWithModel(selected)
+                                }
+                            }
+                        },
+                        onSelectModel = { file ->
+                            if (serverRunning) {
+                                stopServer(clearModel = false)
+                                startServerWithModel(file)
+                            } else {
+                                loadedModelPath = file.absolutePath
+                                setServerStatus("Loaded ${file.name}. Click Start Server.", error = false)
+                            }
+                        },
+                        onRemoveModel = { file ->
+                            if (loadedModelPath == file.absolutePath) stopServer(clearModel = true)
+                            val updatedPaths = serverSettings.modelPaths.filterNot {
+                                File(it).absoluteFile.normalize().path == file.absoluteFile.normalize().path
+                            }
+                            serverSettings = serverSettings.copy(modelPaths = updatedPaths)
+                            SettingsStore.save(serverSettings)
+                            scope.launch(Dispatchers.IO) {
+                                val modelsDirPath = SettingsStore.modelsDir().toAbsolutePath().normalize()
+                                val filePath = file.toPath().toAbsolutePath().normalize()
+                                if (filePath.startsWith(modelsDirPath)) {
+                                    runCatching { Files.deleteIfExists(filePath) }
+                                }
+                                val fresh = scanModels(updatedPaths)
+                                withContext(Dispatchers.Main) {
+                                    models = fresh
+                                    if (loadedModelPath == null) loadedModelPath = fresh.firstOrNull()?.absolutePath
+                                    setServerStatus("Removed ${file.name}.", error = false)
+                                }
+                            }
+                        },
+                        onAddModelFile = { pickedFile ->
+                            val updatedPaths = (serverSettings.modelPaths + pickedFile.path).distinct()
+                            serverSettings = serverSettings.copy(modelPaths = updatedPaths)
+                            SettingsStore.save(serverSettings)
+                            models = scanModels(updatedPaths)
+                            loadedModelPath = pickedFile.path
+                            setServerStatus("Loaded ${pickedFile.name}. Click Start Server.", error = false)
+                        },
+                        onSaveServerSettings = { updated ->
+                            val safe = updated.validated()
+                            serverSettings = safe
+                            SettingsStore.save(safe)
+                            localIp = getLocalIp()
+                            setServerStatus(
+                                if (serverRunning) "Settings saved. Restart server to apply changes." else "Settings saved.",
+                                error = false
+                            )
+                        },
+                        onCreateShortcut = {
+                            val (_, msg) = createLinuxDesktopShortcut()
+                            showToast(msg)
+                        },
+                        onCopyToast = ::showToast
+                    )
+                }
+            }
+        }
+
+        // --- Modals ---
+        if (showApiModal) {
+            ApiEditModal(
+                initial = editingApi,
+                onDismiss = { showApiModal = false },
+                onSave = { saved ->
+                    val exists = customApis.any { it.id == saved.id }
+                    val next = if (exists) customApis.map { if (it.id == saved.id) saved else it } else customApis + saved
+                    customApis = next
+                    ChatStore.saveApis(next)
+                    onUpdatePrefs(chatPrefs.copy(activeApiId = saved.id))
+                    showApiModal = false
+                    showToast("API saved!")
+                }
+            )
+        }
+
+        if (showChatSettingsModal) {
+            ChatSettingsModal(
+                prefs = chatPrefs,
+                onDismiss = { showChatSettingsModal = false },
+                onSave = { updated ->
+                    onUpdatePrefs(updated)
+                    showChatSettingsModal = false
+                    showToast("Settings saved!")
+                }
+            )
+        }
+
+        lightboxAttachment?.let { att ->
+            ImageLightboxModal(attachment = att, onDismiss = { lightboxAttachment = null })
+        }
+
+        renamingChat?.let { chat ->
+            RenameChatModal(
+                currentTitle = chat.title,
+                onDismiss = { renamingChat = null },
+                onSave = { newTitle ->
+                    updateChatById(chat.id) { it.copy(title = newTitle) }
+                    renamingChat = null
+                }
+            )
+        }
+
+        deletingChat?.let { chat ->
+            ConfirmDeleteModal(
+                title = "Delete Chat",
+                message = "Delete \"${chat.title}\"? This cannot be undone.",
+                onDismiss = { deletingChat = null },
+                onConfirm = {
+                    val remaining = chats.filterNot { it.id == chat.id }.ifEmpty { listOf(ChatSession(title = "New Chat")) }
+                    persistChats(remaining)
+                    if (activeChatId == chat.id) {
+                        activeChatId = remaining.first().id
+                        onUpdatePrefs(chatPrefs.copy(activeChatId = activeChatId))
+                    }
+                    deletingChat = null
+                }
+            )
+        }
+
+        deletingApi?.let { api ->
+            ConfirmDeleteModal(
+                title = "Delete API",
+                message = "Remove \"${api.label}\" from saved APIs?",
+                onDismiss = { deletingApi = null },
+                onConfirm = {
+                    val next = customApis.filterNot { it.id == api.id }
+                    customApis = next
+                    ChatStore.saveApis(next)
+                    if (chatPrefs.activeApiId == api.id) {
+                        onUpdatePrefs(chatPrefs.copy(activeApiId = LOCAL_SAMU_API_ID))
+                    }
+                    deletingApi = null
+                }
+            )
+        }
+
+        // Bottom Toast
+        AnimatedVisibility(
+            visible = toastMsg != null,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(palette.surfaceVariant)
+                    .border(1.dp, palette.primary.copy(alpha = 0.5f), RoundedCornerShape(22.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(toastMsg.orEmpty(), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = palette.onSurface)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TopTabPill(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    dotColor: Color?,
+    onClick: () -> Unit
+) {
+    val palette = LocalSaMuColors.current
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) palette.primary else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (selected) palette.onPrimary else palette.textSecondary,
+            modifier = Modifier.size(15.dp)
+        )
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (selected) palette.onPrimary else palette.textSecondary
+        )
+        if (dotColor != null) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(if (selected) Color.White else dotColor, CircleShape)
+            )
+        }
+    }
 }

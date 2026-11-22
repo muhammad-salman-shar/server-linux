@@ -34,11 +34,12 @@ compose.desktop {
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
             packageName = "samu-lab"
             packageVersion = "1.0.0"
-            description = "SaMu Lab - Ultra-fast local OpenAI-compatible server"
+            description = "SaMu Lab - Local AI Chat & OpenAI-Compatible Server"
             vendor = "NeuraSaMu"
             linux {
                 shortcut = true
                 menuGroup = "Development"
+                iconFile.set(project.file("assets/icon.png"))
             }
         }
     }

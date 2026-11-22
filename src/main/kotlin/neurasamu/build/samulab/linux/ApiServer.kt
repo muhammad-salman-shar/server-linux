@@ -13,7 +13,8 @@ import java.util.concurrent.TimeUnit
 
 class ApiServer(
     private val settingsProvider: () -> AppSettings,
-    private val engine: EngineManager
+    private val engine: EngineManager,
+    private val monitor: ServerMonitor? = null
 ) : NanoHTTPD(
     if (settingsProvider().lanAccess) "0.0.0.0" else "127.0.0.1",
     settingsProvider().port
@@ -41,6 +42,7 @@ class ApiServer(
                 else -> notFound()
             }
         } catch (e: Exception) {
+            monitor?.log("ERR", "${session.uri}: ${e.message ?: "unknown"}")
             errorJson(Response.Status.INTERNAL_ERROR, "Server error: ${e.message ?: "unknown"}")
         }
         return withCors(resp)
@@ -75,6 +77,7 @@ class ApiServer(
 
     private fun handleChat(session: IHTTPSession): Response {
         if (!checkAuth(session)) {
+            monitor?.log("ERR", "Unauthorized chat request from ${session.remoteIpAddress}")
             return errorJson(Response.Status.UNAUTHORIZED, "Invalid or missing API key")
         }
         if (!engine.isRunning) {
@@ -87,6 +90,10 @@ class ApiServer(
         val isStream = runCatching { JSONObject(rawBody).optBoolean("stream", false) }
             .getOrDefault(false)
 
+        val clientIp = session.remoteIpAddress ?: "local"
+        val startNanos = monitor?.onRequestStart("/v1/chat/completions", clientIp, isStream)
+            ?: System.nanoTime()
+
         val upstreamReq = Request.Builder()
             .url("$upstreamBase/v1/chat/completions")
             .post(rawBody.toRequestBody("application/json".toMediaType()))
@@ -95,23 +102,26 @@ class ApiServer(
         return try {
             val upstreamResp = client.newCall(upstreamReq).execute()
             if (isStream && upstreamResp.isSuccessful) {
-                streamResponse(upstreamResp)
+                streamResponse(upstreamResp, startNanos)
             } else {
                 val status = statusFromCode(upstreamResp.code)
                 val text = upstreamResp.body?.string()
                     ?: JSONObject().put("error", "Empty upstream response").toString()
                 upstreamResp.close()
+                monitor?.onRequestEnd("/v1/chat/completions", startNanos, upstreamResp.isSuccessful, "HTTP ${upstreamResp.code}")
                 jsonResponse(status, text)
             }
         } catch (e: Exception) {
+            monitor?.onRequestEnd("/v1/chat/completions", startNanos, false, e.message ?: "upstream error")
             errorJson(statusFromCode(502), "Upstream failed: ${e.message ?: "unknown"}")
         }
     }
 
-    private fun streamResponse(resp: okhttp3.Response): Response {
+    private fun streamResponse(resp: okhttp3.Response, startNanos: Long): Response {
         val body = resp.body
         if (body == null) {
             runCatching { resp.close() }
+            monitor?.onRequestEnd("/v1/chat/completions", startNanos, false, "No upstream body")
             return errorJson(Response.Status.INTERNAL_ERROR, "No upstream body")
         }
         val ctype = body.contentType()?.toString() ?: "text/event-stream"
@@ -121,6 +131,10 @@ class ApiServer(
         val pipeOut = PipedOutputStream(pipeIn)
 
         Thread {
+            var tokenEstimate = 0
+            var lastUiReport = 0L
+            var pendingDelta = 0
+            var finishedOk = true
             try {
                 inputStream.use { input ->
                     val buf = ByteArray(8192)
@@ -129,13 +143,41 @@ class ApiServer(
                         if (n < 0) break
                         pipeOut.write(buf, 0, n)
                         pipeOut.flush()
+
+                        // Count SSE data frames as approximate generated tokens
+                        val chunkStr = String(buf, 0, n, Charsets.UTF_8)
+                        var idx = chunkStr.indexOf("data: {")
+                        var hits = 0
+                        while (idx >= 0) {
+                            hits++
+                            idx = chunkStr.indexOf("data: {", idx + 7)
+                        }
+                        if (hits > 0) {
+                            tokenEstimate += hits
+                            pendingDelta += hits
+                            val now = System.currentTimeMillis()
+                            if (now - lastUiReport >= 120L) {
+                                monitor?.onStreamProgress(tokenEstimate, startNanos, pendingDelta)
+                                pendingDelta = 0
+                                lastUiReport = now
+                            }
+                        }
                     }
                 }
+                if (pendingDelta > 0) {
+                    monitor?.onStreamProgress(tokenEstimate, startNanos, pendingDelta)
+                }
             } catch (_: Exception) {
-                // Client or upstream closed connection
+                finishedOk = false
             } finally {
                 runCatching { pipeOut.close() }
                 runCatching { resp.close() }
+                monitor?.onRequestEnd(
+                    "/v1/chat/completions",
+                    startNanos,
+                    finishedOk,
+                    "$tokenEstimate tok"
+                )
             }
         }.apply {
             name = "samu-stream"
