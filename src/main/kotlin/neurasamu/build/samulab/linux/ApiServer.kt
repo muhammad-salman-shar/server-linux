@@ -12,10 +12,12 @@ import java.io.PipedOutputStream
 import java.util.concurrent.TimeUnit
 
 class ApiServer(
-    private val settings: AppSettings,
+    private val settingsProvider: () -> AppSettings,
     private val engine: EngineManager
-) : NanoHTTPD(if (settings.lanAccess) "0.0.0.0" else "127.0.0.1", settings.port) {
-
+) : NanoHTTPD(
+    if (settingsProvider().lanAccess) "0.0.0.0" else "127.0.0.1",
+    settingsProvider().port
+) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -25,26 +27,43 @@ class ApiServer(
     private val upstreamBase = "http://127.0.0.1:8091"
 
     override fun serve(session: IHTTPSession): Response {
-        return try {
+        if (session.method == Method.OPTIONS) {
+            return withCors(newFixedLengthResponse(Response.Status.NO_CONTENT, "text/plain", ""))
+        }
+        val resp = try {
             when (session.uri) {
+                "/health" ->
+                    if (session.method == Method.GET) handleHealth() else notFound()
                 "/v1/models" ->
-                    if (session.method == Method.GET) handleModels() else notFound()
+                    if (session.method == Method.GET) handleModels(session) else notFound()
                 "/v1/chat/completions" ->
                     if (session.method == Method.POST) handleChat(session) else notFound()
                 else -> notFound()
             }
         } catch (e: Exception) {
-            val msg = (e.message ?: "unknown").replace('"', '\'')
-            jsonResponse(Response.Status.INTERNAL_ERROR, """{"error":"Server error: $msg"}""")
+            errorJson(Response.Status.INTERNAL_ERROR, "Server error: ${e.message ?: "unknown"}")
         }
+        return withCors(resp)
     }
 
-    private fun handleModels(): Response {
-        if (!engine.isRunning) {
-            return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, """{"error":"No model loaded"}""")
+    private fun handleHealth(): Response {
+        val body = JSONObject().apply {
+            put("status", if (engine.isRunning) "ok" else "stopped")
+            put("engine_running", engine.isRunning)
+        }.toString()
+        return jsonResponse(Response.Status.OK, body)
+    }
+
+    private fun handleModels(session: IHTTPSession): Response {
+        if (!checkAuth(session)) {
+            return errorJson(Response.Status.UNAUTHORIZED, "Invalid or missing API key")
         }
+        if (!engine.isRunning) {
+            return errorJson(Response.Status.SERVICE_UNAVAILABLE, "No model loaded")
+        }
+        val current = settingsProvider()
         val arr = JSONArray().put(JSONObject().apply {
-            put("id", settings.modelApiName)
+            put("id", current.modelApiName)
             put("object", "model")
         })
         val body = JSONObject().apply {
@@ -55,11 +74,11 @@ class ApiServer(
     }
 
     private fun handleChat(session: IHTTPSession): Response {
-        if (!engine.isRunning) {
-            return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, """{"error":"Engine not running"}""")
-        }
         if (!checkAuth(session)) {
-            return jsonResponse(Response.Status.UNAUTHORIZED, """{"error":"Invalid or missing API key"}""")
+            return errorJson(Response.Status.UNAUTHORIZED, "Invalid or missing API key")
+        }
+        if (!engine.isRunning) {
+            return errorJson(Response.Status.SERVICE_UNAVAILABLE, "Engine not running")
         }
 
         val bodyMap = mutableMapOf<String, String>()
@@ -75,20 +94,17 @@ class ApiServer(
 
         return try {
             val upstreamResp = client.newCall(upstreamReq).execute()
-            if (isStream) {
+            if (isStream && upstreamResp.isSuccessful) {
                 streamResponse(upstreamResp)
             } else {
+                val status = statusFromCode(upstreamResp.code)
                 val text = upstreamResp.body?.string()
-                    ?: """{"error":"Empty upstream response"}"""
+                    ?: JSONObject().put("error", "Empty upstream response").toString()
                 upstreamResp.close()
-                jsonResponse(Response.Status.OK, text)
+                jsonResponse(status, text)
             }
         } catch (e: Exception) {
-            val msg = (e.message ?: "unknown").replace('"', '\'')
-            jsonResponse(object : Response.IStatus {
-                override fun getRequestStatus(): Int = 502
-                override fun getDescription(): String = "502 Bad Gateway"
-            }, """{"error":"Upstream failed: $msg"}""")
+            errorJson(statusFromCode(502), "Upstream failed: ${e.message ?: "unknown"}")
         }
     }
 
@@ -96,7 +112,7 @@ class ApiServer(
         val body = resp.body
         if (body == null) {
             runCatching { resp.close() }
-            return jsonResponse(Response.Status.INTERNAL_ERROR, """{"error":"No upstream body"}""")
+            return errorJson(Response.Status.INTERNAL_ERROR, "No upstream body")
         }
         val ctype = body.contentType()?.toString() ?: "text/event-stream"
         val inputStream = body.byteStream()
@@ -116,7 +132,7 @@ class ApiServer(
                     }
                 }
             } catch (_: Exception) {
-                // client ya upstream ne connection band kiya
+                // Client or upstream closed connection
             } finally {
                 runCatching { pipeOut.close() }
                 runCatching { resp.close() }
@@ -134,9 +150,27 @@ class ApiServer(
     }
 
     private fun checkAuth(session: IHTTPSession): Boolean {
-        if (!settings.requireAuth) return true
-        val h = session.headers["authorization"] ?: return false
-        return h == "Bearer ${settings.apiKey}"
+        val current = settingsProvider()
+        if (!current.requireAuth) return true
+        val h = session.headers["authorization"]?.trim() ?: return false
+        return h == "Bearer ${current.apiKey}"
+    }
+
+    private fun withCors(resp: Response): Response {
+        resp.addHeader("Access-Control-Allow-Origin", "*")
+        resp.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        resp.addHeader("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        return resp
+    }
+
+    private fun statusFromCode(code: Int): Response.IStatus = object : Response.IStatus {
+        override fun getRequestStatus(): Int = code
+        override fun getDescription(): String = "$code"
+    }
+
+    private fun errorJson(status: Response.IStatus, message: String): Response {
+        val body = JSONObject().put("error", message).toString()
+        return jsonResponse(status, body)
     }
 
     private fun jsonResponse(status: Response.IStatus, body: String): Response =

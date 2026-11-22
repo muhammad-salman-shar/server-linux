@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Settings
@@ -59,7 +60,7 @@ import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.nio.file.Path
 import java.util.Locale
 
 private val DarkColors = darkColorScheme(
@@ -92,16 +93,82 @@ private fun DashboardScreen() {
     val engine = remember { EngineManager() }
     var apiServer by remember { mutableStateOf<ApiServer?>(null) }
     var serverRunning by remember { mutableStateOf(false) }
-    var models by remember { mutableStateOf(scanModels()) }
-    var loadedModel by remember { mutableStateOf<String?>(null) }
+    var isStarting by remember { mutableStateOf(false) }
+    var models by remember { mutableStateOf(scanModels(settings.modelPaths)) }
+    var loadedModelPath by remember { mutableStateOf<String?>(models.firstOrNull()?.absolutePath) }
     var showSettings by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
-    var isDownloading by remember { mutableStateOf(false) }
-    var downloadMsg by remember { mutableStateOf("") }
+    var isStatusError by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     val localIp = remember { getLocalIp() }
-    val lanUrl = "http://$localIp:${settings.port}"
+    val displayHost = if (settings.lanAccess) localIp else "127.0.0.1"
+    val apiBaseUrl = "http://$displayHost:${settings.port}/v1"
+
+    fun setStatus(msg: String?, error: Boolean = false) {
+        statusMessage = msg
+        isStatusError = error
+    }
+
+    fun stopAll(clearModel: Boolean = false) {
+        runCatching { apiServer?.stop() }
+        apiServer = null
+        engine.stop()
+        serverRunning = false
+        isStarting = false
+        if (clearModel) loadedModelPath = null
+    }
+
+    fun startWithModel(modelFile: File) {
+        if (isStarting) return
+        if (!modelFile.exists()) {
+            setStatus("Model file not found on disk: ${modelFile.name}", error = true)
+            return
+        }
+        loadedModelPath = modelFile.absolutePath
+        isStarting = true
+        setStatus("Preparing ${modelFile.name}...", error = false)
+
+        engine.ensureEngineAndStart(
+            modelPath = modelFile.toPath(),
+            settings = settings,
+            onProgress = { msg ->
+                scope.launch(Dispatchers.Main) {
+                    setStatus(msg, error = false)
+                }
+            },
+            onReady = { ok, err ->
+                scope.launch(Dispatchers.Main) {
+                    isStarting = false
+                    if (ok) {
+                        try {
+                            runCatching { apiServer?.stop() }
+                            apiServer = ApiServer({ settings }, engine).also { it.start() }
+                            serverRunning = true
+                            setStatus("Running! Connect any device using $apiBaseUrl", error = false)
+                        } catch (e: Exception) {
+                            engine.stop()
+                            apiServer = null
+                            serverRunning = false
+                            setStatus("API server failed to start: ${e.message}", error = true)
+                        }
+                    } else {
+                        serverRunning = false
+                        setStatus(err ?: "Engine failed to start", error = true)
+                    }
+                }
+            },
+            onUnexpectedExit = { code ->
+                scope.launch(Dispatchers.Main) {
+                    runCatching { apiServer?.stop() }
+                    apiServer = null
+                    serverRunning = false
+                    isStarting = false
+                    setStatus("Engine stopped unexpectedly (code $code). Check engine.log", error = true)
+                }
+            }
+        )
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -138,17 +205,21 @@ private fun DashboardScreen() {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    val dotColor = when {
+                        serverRunning -> Color(0xFF4CAF50)
+                        isStarting -> Color(0xFFFFB300)
+                        else -> Color(0xFFF44336)
+                    }
+                    val statusLabel = when {
+                        serverRunning -> "Server Running"
+                        isStarting -> "Starting..."
+                        else -> "Server Stopped"
+                    }
                     Box(
-                        modifier = Modifier.size(12.dp).background(
-                            if (serverRunning) Color(0xFF4CAF50) else Color(0xFFF44336),
-                            CircleShape
-                        )
+                        modifier = Modifier.size(12.dp).background(dotColor, CircleShape)
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        if (serverRunning) "Server Running" else "Server Stopped",
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Text(statusLabel, fontWeight = FontWeight.SemiBold)
                 }
 
                 Spacer(Modifier.height(12.dp))
@@ -161,133 +232,96 @@ private fun DashboardScreen() {
                     },
                     label = { Text("Model Name (API)") },
                     singleLine = true,
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            copyToClipboard(settings.modelApiName)
+                            setStatus("Model name copied!", error = false)
+                        }) {
+                            Icon(
+                                Icons.Filled.ContentCopy,
+                                contentDescription = "Copy Model Name",
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth()
                 )
 
                 Spacer(Modifier.height(10.dp))
 
-                InfoRow("LAN URL", lanUrl)
-                InfoRow("API Key", settings.apiKey)
+                InfoRow(if (settings.lanAccess) "API URL" else "Local URL", apiBaseUrl)
+                InfoRow("Model Name", settings.modelApiName)
+                if (settings.requireAuth) {
+                    InfoRow("API Key", settings.apiKey)
+                }
 
                 statusMessage?.let { msg ->
                     Spacer(Modifier.height(8.dp))
-                    Text(msg, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                    
-                    if (msg.contains("missing") || msg.contains("not executable")) {
-                        Button(
-                            onClick = {
-                                isDownloading = true
-                                downloadMsg = "Starting..."
-                                engine.downloadEngine(
-                                    onProgress = { p -> scope.launch(Dispatchers.Main) { downloadMsg = p } },
-                                    onDone = { success, err ->
-                                        scope.launch(Dispatchers.Main) {
-                                            isDownloading = false
-                                            if (success) {
-                                                statusMessage = "Engine installed! Click Start Server."
-                                            } else {
-                                                statusMessage = "Download failed: $err"
-                                            }
-                                        }
-                                    }
-                                )
-                            },
-                            enabled = !isDownloading,
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
-                        ) {
-                            Text(if (isDownloading) downloadMsg else "⬇ Auto-Download Engine Now")
-                        }
-                    }
+                    Text(
+                        msg,
+                        color = if (isStatusError) MaterialTheme.colorScheme.error else Color(0xFF81C784),
+                        fontSize = 12.sp
+                    )
                 }
 
                 Spacer(Modifier.height(12.dp))
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
-                        onClick = { copyToClipboard(lanUrl) },
+                        onClick = {
+                            copyToClipboard(apiBaseUrl)
+                            setStatus("API URL copied!", error = false)
+                        },
                         modifier = Modifier.weight(1f)
                     ) { Text("Copy URL") }
 
                     OutlinedButton(
-                        onClick = { copyToClipboard(settings.apiKey) },
+                        onClick = {
+                            copyToClipboard(settings.modelApiName)
+                            setStatus("Model name copied!", error = false)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Copy Model") }
+
+                    OutlinedButton(
+                        onClick = {
+                            copyToClipboard(settings.apiKey)
+                            setStatus("API key copied!", error = false)
+                        },
                         modifier = Modifier.weight(1f)
                     ) { Text("Copy Key") }
-
-                    Button(
-                        onClick = {
-                            if (serverRunning) {
-                                runCatching { apiServer?.stop() }
-                                apiServer = null
-                                engine.stop()
-                                serverRunning = false
-                                loadedModel = null
-                                statusMessage = null
-                            } else {
-                                val model = loadedModel ?: models.firstOrNull()?.name
-                                if (model == null) {
-                                    statusMessage = "Pehle ek model add karo (+ button se)"
-                                    return@Button
-                                }
-                                val path = SettingsStore.modelsDir().resolve(model)
-                                loadedModel = model
-                                statusMessage = null
-                                engine.start(path, settings) { ok, err ->
-                                    scope.launch(Dispatchers.Main) {
-                                        if (ok) {
-                                            try {
-                                                apiServer = ApiServer(settings, engine).also { it.start() }
-                                                serverRunning = true
-                                            } catch (e: Exception) {
-                                                statusMessage = "API server fail: ${e.message}"
-                                                engine.stop()
-                                                serverRunning = false
-                                            }
-                                        } else {
-                                            statusMessage = err ?: "Engine failed"
-                                            serverRunning = false
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (serverRunning) Color(0xFFD32F2F)
-                            else MaterialTheme.colorScheme.primary
-                        )
-                    ) {
-                        Text(if (serverRunning) "Stop Server" else "Start Server")
-                    }
                 }
 
-                if (serverRunning && loadedModel != null) {
-                    Spacer(Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                val name = loadedModel ?: return@OutlinedButton
-                                engine.stop()
-                                val path = SettingsStore.modelsDir().resolve(name)
-                                engine.start(path, settings) { _, err ->
-                                    scope.launch(Dispatchers.Main) {
-                                        if (err != null) statusMessage = err
-                                    }
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Reload Model") }
+                Spacer(Modifier.height(10.dp))
 
-                        OutlinedButton(
-                            onClick = {
-                                engine.stop()
-                                runCatching { apiServer?.stop() }
-                                apiServer = null
-                                serverRunning = false
-                                loadedModel = null
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Unload Model") }
-                    }
+                Button(
+                    onClick = {
+                        if (serverRunning || isStarting) {
+                            stopAll(clearModel = false)
+                            setStatus("Server stopped.", error = false)
+                        } else {
+                            val selected = models.find { it.absolutePath == loadedModelPath }
+                                ?: models.firstOrNull()
+                            if (selected == null) {
+                                setStatus("Please add a .gguf model first using the + button.", error = true)
+                                return@Button
+                            }
+                            startWithModel(selected)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (serverRunning || isStarting) Color(0xFFD32F2F)
+                        else MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(
+                        when {
+                            isStarting -> "Stop / Cancel"
+                            serverRunning -> "Stop Server"
+                            else -> "Start Server"
+                        }
+                    )
                 }
             }
         }
@@ -305,7 +339,7 @@ private fun DashboardScreen() {
             if (models.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        "Koi model nahi hai. Neeche + button se .gguf add karo.",
+                        "No models yet. Click + below to pick a .gguf file from storage.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -314,20 +348,44 @@ private fun DashboardScreen() {
                     modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    items(models, key = { it.name }) { file ->
+                    items(models, key = { it.absolutePath }) { file ->
                         ModelRow(
                             file = file,
-                            isLoaded = loadedModel == file.name,
-                            onLoad = { loadedModel = file.name },
+                            isLoaded = loadedModelPath == file.absolutePath,
+                            isRunning = serverRunning && loadedModelPath == file.absolutePath,
+                            onLoad = {
+                                if (serverRunning) {
+                                    stopAll(clearModel = false)
+                                    startWithModel(file)
+                                } else {
+                                    loadedModelPath = file.absolutePath
+                                    setStatus("Loaded ${file.name}. Click Start Server.", error = false)
+                                }
+                            },
                             onDelete = {
-                                runCatching { Files.deleteIfExists(file.toPath()) }
-                                models = scanModels()
-                                if (loadedModel == file.name) {
-                                    loadedModel = null
-                                    engine.stop()
-                                    runCatching { apiServer?.stop() }
-                                    apiServer = null
-                                    serverRunning = false
+                                if (loadedModelPath == file.absolutePath) {
+                                    stopAll(clearModel = true)
+                                }
+                                val updatedPaths = settings.modelPaths.filterNot {
+                                    File(it).absoluteFile.normalize().path == file.absoluteFile.normalize().path
+                                }
+                                settings = settings.copy(modelPaths = updatedPaths)
+                                SettingsStore.save(settings)
+
+                                scope.launch(Dispatchers.IO) {
+                                    val modelsDirPath = SettingsStore.modelsDir().toAbsolutePath().normalize()
+                                    val filePath = file.toPath().toAbsolutePath().normalize()
+                                    if (filePath.startsWith(modelsDirPath)) {
+                                        runCatching { Files.deleteIfExists(filePath) }
+                                    }
+                                    val fresh = scanModels(updatedPaths)
+                                    withContext(Dispatchers.Main) {
+                                        models = fresh
+                                        if (loadedModelPath == null) {
+                                            loadedModelPath = fresh.firstOrNull()?.absolutePath
+                                        }
+                                        setStatus("Removed ${file.name} from list.", error = false)
+                                    }
                                 }
                             }
                         )
@@ -341,22 +399,17 @@ private fun DashboardScreen() {
                     val dir = picked.first
                     val name = picked.second
                     if (dir != null && name != null) {
-                        scope.launch(Dispatchers.IO) {
-                            try {
-                                val src = File(dir, name).toPath()
-                                val dest = SettingsStore.modelsDir().resolve(name)
-                                Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING)
-                                val fresh = scanModels()
-                                withContext(Dispatchers.Main) {
-                                    models = fresh
-                                    statusMessage = null
-                                }
-                            } catch (e: Exception) {
-                                withContext(Dispatchers.Main) {
-                                    statusMessage = "Copy fail: ${e.message}"
-                                }
-                            }
+                        val pickedFile = File(dir, name).absoluteFile.normalize()
+                        if (!pickedFile.exists()) {
+                            setStatus("Selected file not found.", error = true)
+                            return@FloatingActionButton
                         }
+                        val updatedPaths = (settings.modelPaths + pickedFile.path).distinct()
+                        settings = settings.copy(modelPaths = updatedPaths)
+                        SettingsStore.save(settings)
+                        models = scanModels(updatedPaths)
+                        loadedModelPath = pickedFile.path
+                        setStatus("Loaded ${pickedFile.name}. Click Start Server.", error = false)
                     }
                 },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
@@ -371,10 +424,16 @@ private fun DashboardScreen() {
         SettingsDialog(
             settings = settings,
             onDismiss = { showSettings = false },
-            onSave = {
-                settings = it
-                SettingsStore.save(it)
+            onSave = { updated ->
+                val safe = updated.validated()
+                settings = safe
+                SettingsStore.save(safe)
                 showSettings = false
+                if (serverRunning) {
+                    setStatus("Settings saved. Restart server to apply port/LAN/context changes.", error = false)
+                } else {
+                    setStatus("Settings saved.", error = false)
+                }
             }
         )
     }
@@ -404,6 +463,7 @@ private fun InfoRow(label: String, value: String) {
 private fun ModelRow(
     file: File,
     isLoaded: Boolean,
+    isRunning: Boolean,
     onLoad: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -445,8 +505,8 @@ private fun ModelRow(
             }
             if (isLoaded) {
                 Text(
-                    "LOADED",
-                    color = MaterialTheme.colorScheme.primary,
+                    if (isRunning) "RUNNING" else "LOADED",
+                    color = if (isRunning) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(end = 8.dp)
@@ -457,7 +517,7 @@ private fun ModelRow(
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Filled.Delete,
-                    contentDescription = "Delete",
+                    contentDescription = "Remove",
                     tint = Color(0xFFEF5350),
                     modifier = Modifier.size(20.dp)
                 )
@@ -489,7 +549,7 @@ private fun SettingsDialog(
                 OutlinedTextField(
                     value = port,
                     onValueChange = { port = it.filter(Char::isDigit) },
-                    label = { Text("Port") },
+                    label = { Text("Port (1024-65535)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -507,7 +567,7 @@ private fun SettingsDialog(
                 OutlinedTextField(
                     value = ctx,
                     onValueChange = { ctx = it.filter(Char::isDigit) },
-                    label = { Text("Context Size") },
+                    label = { Text("Context Size (512-131072)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -526,7 +586,7 @@ private fun SettingsDialog(
                         threadsOverride = threads.toIntOrNull() ?: 0,
                         contextSize = ctx.toIntOrNull() ?: 4096,
                         requireAuth = auth
-                    )
+                    ).validated()
                 )
             }) { Text("Save") }
         },
@@ -536,9 +596,13 @@ private fun SettingsDialog(
     )
 }
 
-private fun scanModels(): List<File> {
+private fun scanModels(savedPaths: List<String>): List<File> {
     val dir = SettingsStore.modelsDir().toFile()
-    return (dir.listFiles { f -> f.isFile && f.name.lowercase().endsWith(".gguf") } ?: emptyArray())
+    val localFiles = (dir.listFiles { f -> f.isFile && f.name.lowercase().endsWith(".gguf") } ?: emptyArray()).toList()
+    val linkedFiles = savedPaths.map { File(it) }.filter { it.isFile && it.name.lowercase().endsWith(".gguf") }
+    return (localFiles + linkedFiles)
+        .map { it.absoluteFile.normalize() }
+        .distinctBy { it.path }
         .sortedBy { it.name.lowercase() }
 }
 
@@ -554,8 +618,10 @@ private fun getLocalIp(): String {
 }
 
 private fun copyToClipboard(text: String) {
-    val sel = java.awt.datatransfer.StringSelection(text)
-    java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(sel, sel)
+    runCatching {
+        val sel = java.awt.datatransfer.StringSelection(text)
+        java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(sel, sel)
+    }
 }
 
 private fun openGgufPicker(): Pair<String?, String?> {

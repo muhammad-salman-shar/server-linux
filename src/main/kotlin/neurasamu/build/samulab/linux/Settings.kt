@@ -1,9 +1,11 @@
 package neurasamu.build.samulab.linux
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.file.Files
 import java.nio.file.Path
-import kotlin.random.Random
+import java.nio.file.StandardCopyOption
+import java.security.SecureRandom
 
 data class AppSettings(
     val port: Int = 8080,
@@ -12,8 +14,18 @@ data class AppSettings(
     val contextSize: Int = 4096,
     val requireAuth: Boolean = false,
     val apiKey: String = generateKey(),
-    val modelApiName: String = "samu-local"
+    val modelApiName: String = "samu-local",
+    val modelPaths: List<String> = emptyList()
 ) {
+    fun validated(): AppSettings = copy(
+        port = port.coerceIn(1024, 65535),
+        threadsOverride = threadsOverride.coerceIn(0, 256),
+        contextSize = contextSize.coerceIn(512, 131072),
+        apiKey = apiKey.trim().ifEmpty { generateKey() },
+        modelApiName = modelApiName.trim().ifEmpty { "samu-local" },
+        modelPaths = modelPaths.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+    )
+
     fun toJson(): String = JSONObject().apply {
         put("port", port)
         put("lanAccess", lanAccess)
@@ -22,25 +34,38 @@ data class AppSettings(
         put("requireAuth", requireAuth)
         put("apiKey", apiKey)
         put("modelApiName", modelApiName)
+        put("modelPaths", JSONArray(modelPaths))
     }.toString(2)
 
     companion object {
+        private val secureRandom = SecureRandom()
+
         fun generateKey(): String {
             val chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            return "sk-samu-" + (1..24).map { chars[Random.nextInt(chars.length)] }.joinToString("")
+            return "sk-samu-" + (1..24).map { chars[secureRandom.nextInt(chars.length)] }.joinToString("")
         }
 
         fun fromJson(text: String): AppSettings {
             val o = JSONObject(text)
+            val arr = o.optJSONArray("modelPaths")
+            val paths = buildList {
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val p = arr.optString(i, "").trim()
+                        if (p.isNotEmpty()) add(p)
+                    }
+                }
+            }
             return AppSettings(
                 port = o.optInt("port", 8080),
                 lanAccess = o.optBoolean("lanAccess", true),
                 threadsOverride = o.optInt("threadsOverride", 0),
                 contextSize = o.optInt("contextSize", 4096),
                 requireAuth = o.optBoolean("requireAuth", false),
-                apiKey = o.optString("apiKey", generateKey()),
-                modelApiName = o.optString("modelApiName", "samu-local")
-            )
+                apiKey = o.optString("apiKey", "").ifBlank { generateKey() },
+                modelApiName = o.optString("modelApiName", "samu-local"),
+                modelPaths = paths
+            ).validated()
         }
     }
 }
@@ -51,6 +76,7 @@ object SettingsStore {
     private val modelsDir: Path = appDir.resolve("models")
 
     fun ensureDirs() {
+        Files.createDirectories(appDir)
         Files.createDirectories(modelsDir)
     }
 
@@ -58,9 +84,9 @@ object SettingsStore {
         ensureDirs()
         return if (Files.exists(settingsFile)) {
             runCatching { AppSettings.fromJson(Files.readString(settingsFile)) }
-                .getOrElse { AppSettings() }
+                .getOrElse { AppSettings().validated() }
         } else {
-            val s = AppSettings()
+            val s = AppSettings().validated()
             save(s)
             s
         }
@@ -68,7 +94,14 @@ object SettingsStore {
 
     fun save(settings: AppSettings) {
         ensureDirs()
-        Files.writeString(settingsFile, settings.toJson())
+        val safe = settings.validated()
+        val tmpFile = appDir.resolve("settings.json.tmp")
+        try {
+            Files.writeString(tmpFile, safe.toJson())
+            Files.move(tmpFile, settingsFile, StandardCopyOption.REPLACE_EXISTING)
+        } catch (_: Exception) {
+            Files.writeString(settingsFile, safe.toJson())
+        }
     }
 
     fun modelsDir(): Path {

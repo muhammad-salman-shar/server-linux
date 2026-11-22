@@ -30,6 +30,8 @@ compose.desktop {
             targetFormats(
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb
             )
+            includeAllModules = true
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
             packageName = "samu-lab"
             packageVersion = "1.0.0"
             description = "SaMu Lab - Ultra-fast local OpenAI-compatible server"

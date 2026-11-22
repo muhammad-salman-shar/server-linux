@@ -31,6 +31,70 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fakeroot dpkg-dev
 
+      - name: Bundle latest llama-server (Linux x64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - << 'PYEOF'
+          import json, os, shutil, subprocess, tempfile, urllib.request
+          from pathlib import Path
+
+          req = urllib.request.Request(
+              "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+              headers={
+                  "User-Agent": "SaMu-Lab-CI",
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              release = json.loads(resp.read().decode())
+
+          asset_url = None
+          for a in release.get("assets", []):
+              name = a.get("name", "")
+              if name.endswith("bin-ubuntu-x64.tar.gz"):
+                  asset_url = a["browser_download_url"]
+                  print("Selected asset:", name)
+                  break
+
+          if not asset_url:
+              raise SystemExit("No bin-ubuntu-x64.tar.gz asset found in latest llama.cpp release")
+
+          with tempfile.TemporaryDirectory() as tmp:
+              tmp_path = Path(tmp)
+              archive = tmp_path / "llama.tar.gz"
+              dl_req = urllib.request.Request(asset_url, headers={"User-Agent": "SaMu-Lab-CI"})
+              with urllib.request.urlopen(dl_req, timeout=180) as r, open(archive, "wb") as f:
+                  shutil.copyfileobj(r, f)
+
+              extract_dir = tmp_path / "extracted"
+              extract_dir.mkdir()
+              subprocess.run(["tar", "-xzf", str(archive), "-C", str(extract_dir)], check=True)
+
+              bins = list(extract_dir.rglob("llama-server"))
+              if not bins:
+                  raise SystemExit("llama-server not found in extracted archive")
+              bin_dir = bins[0].parent
+
+              stage_dir = tmp_path / "stage"
+              stage_dir.mkdir()
+              for item in bin_dir.iterdir():
+                  if item.name == "llama-server" or ".so" in item.name:
+                      dest = stage_dir / item.name
+                      if item.is_symlink():
+                          os.symlink(os.readlink(item), dest)
+                      elif item.is_file():
+                          shutil.copy2(item, dest)
+
+              out_dir = Path("resources/linux-x64")
+              out_dir.mkdir(parents=True, exist_ok=True)
+              out_tar = out_dir / "llama-engine.tar.gz"
+              subprocess.run(["tar", "-czf", str(out_tar), "-C", str(stage_dir), "."], check=True)
+              print(f"Bundled engine archive: {out_tar} ({out_tar.stat().st_size / (1024*1024):.1f} MB)")
+          PYEOF
+          ls -lh resources/linux-x64/llama-engine.tar.gz
+
       - name: Build .deb
         run: gradle packageDeb --no-daemon --stacktrace
 
