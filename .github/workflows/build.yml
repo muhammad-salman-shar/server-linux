@@ -32,10 +32,10 @@ jobs:
           sudo apt-get install -y fakeroot dpkg-dev
 
       - name: Bundle latest llama-server (Linux x64)
+        shell: python
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 - << 'PYEOF'
           import json, os, shutil, subprocess, tempfile, urllib.request
           from pathlib import Path
 
@@ -98,8 +98,6 @@ jobs:
               out_tar = out_dir / "llama-engine.tar.gz"
               subprocess.run(["tar", "-czf", str(out_tar), "-C", str(stage_dir), "."], check=True)
               print(f"Bundled Linux engine: {out_tar} ({out_tar.stat().st_size / (1024*1024):.1f} MB)")
-          PYEOF
-          ls -lh resources/linux-x64/llama-engine.tar.gz
 
       - name: Bundle Noto Color Emoji font
         run: |

@@ -478,7 +478,7 @@ private fun SaMuLabRoot(
         }
     }
 
-    fun runAssistantForChat(chatId: String, history: List<ChatMessage>) {
+    fun runAssistantForChat(chatId: String, history: List<ChatMessage>, forceSkipThinking: Boolean = false) {
         val api = activeApi
         if (api == null) {
             showToast("Please select or add an API first.")
@@ -502,21 +502,29 @@ private fun SaMuLabRoot(
         streamingChatId = chatId
 
         val globalInstr = if (chatPrefs.customInstructionsEnabled) chatPrefs.customInstructions else null
+        val useThink = !forceSkipThinking && chatPrefs.thinkingEnabled && chatPrefs.thinkingEffort != ThinkingEffort.OFF
+        val effort = if (forceSkipThinking) ThinkingEffort.OFF else chatPrefs.thinkingEffort
+
         scope.launch(Dispatchers.IO) {
             chatClient.streamChat(
                 api = api,
                 history = history,
                 globalInstructions = globalInstr,
                 supportsThinking = supportsThinking,
-                thinkingEnabled = chatPrefs.thinkingEnabled && chatPrefs.thinkingEffort != ThinkingEffort.OFF,
-                thinkingEffort = chatPrefs.thinkingEffort,
+                thinkingEnabled = useThink,
+                thinkingEffort = effort,
                 onDelta = { partial ->
                     scope.launch(Dispatchers.Main) {
                         streamingText = partial
                     }
                 },
-                onComplete = { fullText, _, err ->
+                onComplete = { fullText, _, wasSkipped, err ->
                     scope.launch(Dispatchers.Main) {
+                        if (wasSkipped) {
+                            streamingText = ""
+                            runAssistantForChat(chatId, history, forceSkipThinking = true)
+                            return@launch
+                        }
                         isStreaming = false
                         streamingText = ""
                         streamingChatId = null
@@ -867,6 +875,7 @@ private fun SaMuLabRoot(
                         onOpenChatSettings = { showChatSettingsModal = true },
                         onSendMessage = ::sendCurrentMessage,
                         onStopStreaming = { chatClient.abort() },
+                        onSkipThinking = { chatClient.abortForSkip() },
                         onEditMessage = ::editMessage,
                         onRegenerateMessage = ::regenerateFrom,
                         onSelectTextMessage = { msg -> selectingText = msg.content },

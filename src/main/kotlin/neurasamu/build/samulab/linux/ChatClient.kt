@@ -23,8 +23,17 @@ class ChatClient {
 
     @Volatile private var activeCall: Call? = null
     @Volatile private var cancelledByUser: Boolean = false
+    @Volatile private var skippedByUser: Boolean = false
 
     fun abort() {
+        skippedByUser = false
+        cancelledByUser = true
+        runCatching { activeCall?.cancel() }
+        activeCall = null
+    }
+
+    fun abortForSkip() {
+        skippedByUser = true
         cancelledByUser = true
         runCatching { activeCall?.cancel() }
         activeCall = null
@@ -45,14 +54,15 @@ class ChatClient {
         globalInstructions: String?,
         supportsThinking: Boolean = false,
         thinkingEnabled: Boolean = true,
-        thinkingEffort: ThinkingEffort = ThinkingEffort.HIGH,
+        thinkingEffort: ThinkingEffort = ThinkingEffort.AUTO,
         onDelta: (String) -> Unit,
-        onComplete: (fullText: String, wasStopped: Boolean, error: String?) -> Unit
+        onComplete: (fullText: String, wasStopped: Boolean, wasSkipped: Boolean, error: String?) -> Unit
     ) {
         cancelledByUser = false
+        skippedByUser = false
         val base = sanitizeApiUrl(api.baseUrl).trimEnd('/')
         if (base.isBlank()) {
-            onComplete("", false, "API Base URL is empty.")
+            onComplete("", false, false, "API Base URL is empty.")
             return
         }
         val endpoint = resolveEndpoint(base, "/chat/completions")
@@ -144,15 +154,31 @@ class ChatClient {
             }
         }
 
+        val effectiveEffort = if (!thinkingEnabled) ThinkingEffort.OFF else thinkingEffort
         val payloadObj = JSONObject().apply {
             put("model", api.modelName.ifBlank { "samu-local" })
             put("messages", messagesArray)
             put("stream", true)
-            if (supportsThinking) {
-                val enableThink = thinkingEnabled && thinkingEffort != ThinkingEffort.OFF
-                put("chat_template_kwargs", JSONObject().put("enable_thinking", enableThink))
-                put("reasoning_effort", if (enableThink) thinkingEffort.apiValue else "none")
-                put("reasoning_budget", if (enableThink) thinkingEffort.budgetTokens else 0)
+
+            when (effectiveEffort) {
+                ThinkingEffort.OFF -> {
+                    put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
+                    put("reasoning_effort", "none")
+                    put("reasoning_budget", 0)
+                }
+                ThinkingEffort.AUTO -> {
+                    if (supportsThinking) {
+                        put("chat_template_kwargs", JSONObject().put("enable_thinking", true))
+                    }
+                }
+                ThinkingEffort.LOW,
+                ThinkingEffort.HIGH,
+                ThinkingEffort.MAX,
+                ThinkingEffort.ULTRA -> {
+                    put("chat_template_kwargs", JSONObject().put("enable_thinking", true))
+                    put("reasoning_effort", effectiveEffort.apiValue)
+                    put("reasoning_budget", effectiveEffort.budgetTokens)
+                }
             }
         }
 
@@ -186,12 +212,12 @@ class ChatClient {
                             ?: j.optString("error").ifBlank { null }
                     }.getOrNull()
                     val msg = parsedErr ?: "HTTP ${resp.code}: ${errBody.take(200)}"
-                    onComplete("", false, msg)
+                    onComplete("", false, false, msg)
                     return
                 }
 
                 val body = resp.body ?: run {
-                    onComplete("", false, "Empty response from API")
+                    onComplete("", false, false, "Empty response from API")
                     return
                 }
 
@@ -207,9 +233,9 @@ class ChatClient {
                     }.getOrDefault("")
                     if (parsed.isNotEmpty()) {
                         onDelta(parsed)
-                        onComplete(parsed, false, null)
+                        onComplete(parsed, false, false, null)
                     } else {
-                        onComplete("", false, "Unexpected JSON response")
+                        onComplete("", false, false, "Unexpected JSON response")
                     }
                     return
                 }
@@ -266,6 +292,10 @@ class ChatClient {
                     }
                 }
 
+                if (skippedByUser) {
+                    onComplete("", false, true, null)
+                    return
+                }
                 if (inReasoningBlock) {
                     buffer.append("\n</think>")
                 }
@@ -274,21 +304,25 @@ class ChatClient {
 
                 if (cancelledByUser) {
                     val stoppedText = if (finalText.isBlank()) "[stopped]" else "$finalText\n\n[stopped]"
-                    onComplete(stoppedText, true, null)
+                    onComplete(stoppedText, true, false, null)
                 } else {
-                    onComplete(finalText, false, null)
+                    onComplete(finalText, false, false, null)
                 }
             }
         } catch (e: Exception) {
+            if (skippedByUser) {
+                onComplete("", false, true, null)
+                return
+            }
             if (inReasoningBlock) buffer.append("\n</think>")
             val partial = buffer.toString()
             if (cancelledByUser) {
                 val stoppedText = if (partial.isBlank()) "[stopped]" else "$partial\n\n[stopped]"
-                onComplete(stoppedText, true, null)
+                onComplete(stoppedText, true, false, null)
             } else if (partial.isNotBlank()) {
-                onComplete("$partial\n\n[connection lost]", false, e.message ?: "Connection lost")
+                onComplete("$partial\n\n[connection lost]", false, false, e.message ?: "Connection lost")
             } else {
-                onComplete("", false, e.message ?: "Request failed")
+                onComplete("", false, false, e.message ?: "Request failed")
             }
         } finally {
             if (activeCall === call) activeCall = null

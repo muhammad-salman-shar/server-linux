@@ -73,6 +73,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
@@ -155,6 +156,7 @@ fun ChatScreen(
     onOpenChatSettings: () -> Unit,
     onSendMessage: () -> Unit,
     onStopStreaming: () -> Unit,
+    onSkipThinking: () -> Unit,
     onEditMessage: (ChatMessage) -> Unit,
     onRegenerateMessage: (ChatMessage) -> Unit,
     onSelectTextMessage: (ChatMessage) -> Unit,
@@ -229,7 +231,7 @@ fun ChatScreen(
                     }
 
                     // Top-Left Collapsible Thinking Dropdown (auto-shown only when model supports thinking)
-                    if (supportsThinking && chatMode == ChatMode.CHAT) {
+                    if (chatMode == ChatMode.CHAT) {
                         ThinkingTopDropdown(
                             thinkingEnabled = thinkingEnabled,
                             thinkingEffort = thinkingEffort,
@@ -439,6 +441,7 @@ fun ChatScreen(
                                 item(key = "__streaming__") {
                                     StreamingBubbleItem(
                                         text = streamingText,
+                                        onSkipThinking = onSkipThinking,
                                         onCopyCode = { code ->
                                             if (copyToClipboard(code)) onCopyToast("Code copied!")
                                         }
@@ -632,10 +635,12 @@ private fun ThinkingTopDropdown(
                 .border(1.dp, palette.divider, RoundedCornerShape(10.dp))
         ) {
             val options = listOf(
-                Triple(ThinkingEffort.OFF, "Off (Skip)", "Direct fast answer"),
-                Triple(ThinkingEffort.LOW, "Low", "Brief reasoning"),
-                Triple(ThinkingEffort.HIGH, "High", "Balanced reasoning"),
-                Triple(ThinkingEffort.MAX, "Max", "Deep full reasoning")
+                Triple(ThinkingEffort.AUTO, "Auto", ThinkingEffort.AUTO.subtitle),
+                Triple(ThinkingEffort.OFF, "Off (Skip)", ThinkingEffort.OFF.subtitle),
+                Triple(ThinkingEffort.LOW, "Low", ThinkingEffort.LOW.subtitle),
+                Triple(ThinkingEffort.HIGH, "High", ThinkingEffort.HIGH.subtitle),
+                Triple(ThinkingEffort.MAX, "Max", ThinkingEffort.MAX.subtitle),
+                Triple(ThinkingEffort.ULTRA, "Ultra", ThinkingEffort.ULTRA.subtitle)
             )
             options.forEach { (eff, title, sub) ->
                 val isSelected = activeEffort == eff
@@ -1271,7 +1276,8 @@ private fun UserMessageBody(
 private fun AssistantMessageBody(
     content: String,
     isStreaming: Boolean,
-    onCopyCode: (String) -> Unit
+    onCopyCode: (String) -> Unit,
+    onSkipThinking: (() -> Unit)? = null
 ) {
     val palette = LocalSaMuColors.current
     val scale = LocalFontScale.current
@@ -1297,39 +1303,71 @@ private fun AssistantMessageBody(
             val thinkScroll = rememberScrollState()
             Column {
                 Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(palette.surfaceVariant.copy(alpha = 0.45f))
-                        .clickable {
-                            thinkExpanded = !thinkExpanded
-                            if (isStreaming && isStillThinking) userToggledDuringThink = true
-                        }
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Icon(
-                        Icons.Filled.Psychology,
-                        contentDescription = null,
-                        tint = palette.primary,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Text(
-                        text = when {
-                            isStreaming && isStillThinking -> if (thinkExpanded) "Thinking... (Hide)" else "Thinking... (Show)"
-                            thinkExpanded -> "Hide Thinking"
-                            else -> "Show Thinking"
-                        },
-                        fontSize = (11f * scale).sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.primary
-                    )
-                    Icon(
-                        imageVector = if (thinkExpanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
-                        contentDescription = "Toggle Thinking",
-                        tint = palette.primary,
-                        modifier = Modifier.size(14.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(palette.surfaceVariant.copy(alpha = 0.45f))
+                            .clickable {
+                                thinkExpanded = !thinkExpanded
+                                if (isStreaming && isStillThinking) userToggledDuringThink = true
+                            }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Psychology,
+                            contentDescription = null,
+                            tint = palette.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = when {
+                                isStreaming && isStillThinking -> if (thinkExpanded) "Thinking... (Hide)" else "Thinking... (Show)"
+                                thinkExpanded -> "Hide Thinking"
+                                else -> "Show Thinking"
+                            },
+                            fontSize = (11f * scale).sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.primary
+                        )
+                        Icon(
+                            imageVector = if (thinkExpanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
+                            contentDescription = "Toggle Thinking",
+                            tint = palette.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+
+                    if (isStreaming && isStillThinking && onSkipThinking != null) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(palette.primary.copy(alpha = 0.16f))
+                                .border(1.dp, palette.primary.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+                                .clickable(onClick = onSkipThinking)
+                                .padding(horizontal = 9.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Skip Thinking",
+                                fontSize = (11f * scale).sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.primary
+                            )
+                            Icon(
+                                imageVector = Icons.Filled.SkipNext,
+                                contentDescription = "Skip Thinking",
+                                tint = palette.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
                 }
 
                 if (thinkExpanded) {
@@ -1376,6 +1414,7 @@ private fun AssistantMessageBody(
 @Composable
 private fun StreamingBubbleItem(
     text: String,
+    onSkipThinking: () -> Unit,
     onCopyCode: (String) -> Unit
 ) {
     val palette = LocalSaMuColors.current
@@ -1395,7 +1434,7 @@ private fun StreamingBubbleItem(
                 if (text.isBlank()) {
                     ThinkingDots()
                 } else {
-                    AssistantMessageBody(content = text, isStreaming = true, onCopyCode = onCopyCode)
+                    AssistantMessageBody(content = text, isStreaming = true, onCopyCode = onCopyCode, onSkipThinking = onSkipThinking)
                 }
             }
         }

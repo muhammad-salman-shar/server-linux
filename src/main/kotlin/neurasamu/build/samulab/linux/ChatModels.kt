@@ -9,15 +9,22 @@ import java.util.UUID
 
 const val LOCAL_SAMU_API_ID = "__samu_local_builtin__"
 
-enum class ThinkingEffort(val label: String, val apiValue: String, val budgetTokens: Int) {
-    OFF("Off", "none", 0),
-    LOW("Low", "low", 512),
-    HIGH("High", "medium", 4096),
-    MAX("Max", "high", -1);
+enum class ThinkingEffort(
+    val label: String,
+    val apiValue: String,
+    val budgetTokens: Int,
+    val subtitle: String
+) {
+    AUTO("Auto", "auto", -1, "Model decides thinking depth"),
+    OFF("Off", "none", 0, "Skip thinking · instant answer"),
+    LOW("Low", "low", 1000, "Fast thinking (~1000 tok)"),
+    HIGH("High", "medium", 1250, "+25% deeper than Low (~1250 tok)"),
+    MAX("Max", "high", 1500, "+50% deeper than Low (~1500 tok)"),
+    ULTRA("Ultra", "high", 1800, "+80% deepest thinking (~1800 tok)");
 
     companion object {
         fun fromName(name: String?): ThinkingEffort =
-            entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: HIGH
+            entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: AUTO
     }
 }
 
@@ -119,7 +126,7 @@ data class GeneratedMedia(
 
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
-    val role: String, // "user" or "assistant"
+    val role: String,
     val content: String,
     val attachments: List<ChatAttachment> = emptyList(),
     val media: List<GeneratedMedia> = emptyList(),
@@ -211,7 +218,7 @@ data class ChatPrefs(
     val activeApiId: String = LOCAL_SAMU_API_ID,
     val activeChatId: String = "",
     val thinkingEnabled: Boolean = true,
-    val thinkingEffort: ThinkingEffort = ThinkingEffort.HIGH
+    val thinkingEffort: ThinkingEffort = ThinkingEffort.AUTO
 ) {
     fun toJson(): String = JSONObject().apply {
         put("themeMode", themeMode.name)
@@ -235,7 +242,7 @@ data class ChatPrefs(
                 activeApiId = o.optString("activeApiId", LOCAL_SAMU_API_ID),
                 activeChatId = o.optString("activeChatId", ""),
                 thinkingEnabled = o.optBoolean("thinkingEnabled", true),
-                thinkingEffort = ThinkingEffort.fromName(o.optString("thinkingEffort", "HIGH"))
+                thinkingEffort = ThinkingEffort.fromName(o.optString("thinkingEffort", "AUTO"))
             )
         }
     }
