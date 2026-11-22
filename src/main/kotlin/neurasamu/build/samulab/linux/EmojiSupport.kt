@@ -20,7 +20,13 @@ object EmojiSupport {
         }.getOrNull()
         if (fromRes != null) return fromRes
 
-        val sysCandidates = listOf(
+        val sysCandidates = if (Platform.isWindows) {
+            val winDir = System.getenv("WINDIR") ?: "C:\\Windows"
+            listOf(
+                "$winDir\\Fonts\\seguiemj.ttf",
+                "$winDir\\Fonts\\seguisym.ttf"
+            )
+        } else listOf(
             "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",

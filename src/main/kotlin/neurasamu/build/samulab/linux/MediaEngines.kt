@@ -4,10 +4,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.util.Base64
 import java.util.concurrent.TimeUnit
-import java.util.zip.ZipInputStream
 
 class MediaEngines {
     private val dlClient = OkHttpClient.Builder()
@@ -123,7 +121,24 @@ class MediaEngines {
             }
         }
 
-        // 3. Built-in instant fallback via system espeak-ng / espeak so audio generation works out of the box
+        // 3. Built-in OS speech fallback
+        if (Platform.isWindows) {
+            onProgress("Synthesizing audio (Windows Speech)...")
+            val b64 = Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))
+            val safeOut = outFile.absolutePath.replace("'", "''")
+            val ps = "Add-Type -AssemblyName System.Speech; " +
+                "\$t = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('$b64')); " +
+                "\$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; " +
+                "\$s.SetOutputToWaveFile('$safeOut'); " +
+                "\$s.Speak(\$t); \$s.Dispose()"
+            return runMediaProcess(
+                listOf("powershell", "-NoProfile", "-Command", ps),
+                null,
+                outFile,
+                "Windows Speech TTS"
+            )
+        }
+
         val espeak = findBinary("espeak-ng") ?: findBinary("espeak")
         if (espeak != null) {
             onProgress("Synthesizing audio (system TTS)...")
@@ -186,7 +201,6 @@ class MediaEngines {
         if (genRes.isFailure) return genRes
 
         val produced = genRes.getOrThrow()
-        // Convert to web-friendly MP4 if ffmpeg is available
         val ffmpeg = findBinary("ffmpeg")
         if (ffmpeg != null && !produced.extension.equals("mp4", ignoreCase = true)) {
             onProgress("Encoding MP4...")
@@ -216,8 +230,13 @@ class MediaEngines {
             if (workDir != null && workDir.isDirectory) {
                 pb.directory(workDir)
                 val env = pb.environment()
-                val existing = env["LD_LIBRARY_PATH"].orEmpty()
-                env["LD_LIBRARY_PATH"] = if (existing.isBlank()) workDir.absolutePath else "${workDir.absolutePath}:$existing"
+                if (Platform.isWindows) {
+                    val existing = env["Path"] ?: env["PATH"].orEmpty()
+                    env["Path"] = if (existing.isBlank()) workDir.absolutePath else "${workDir.absolutePath};$existing"
+                } else {
+                    val existing = env["LD_LIBRARY_PATH"].orEmpty()
+                    env["LD_LIBRARY_PATH"] = if (existing.isBlank()) workDir.absolutePath else "${workDir.absolutePath}:$existing"
+                }
             }
             pb.redirectErrorStream(true)
             val proc = pb.start()
@@ -238,15 +257,20 @@ class MediaEngines {
         }
     }
 
-    private fun findBinary(name: String, extraDir: File? = null): File? {
-        if (extraDir != null) {
-            val local = File(extraDir, name)
-            if (local.isFile && local.canExecute()) return local
+    private fun findBinary(baseName: String, extraDir: File? = null): File? {
+        val binName = Platform.exeName(baseName)
+        if (extraDir != null && extraDir.isDirectory) {
+            val direct = File(extraDir, binName)
+            if (Platform.isExecutableFile(direct)) return direct
+            extraDir.walkTopDown().maxDepth(3)
+                .firstOrNull { it.isFile && it.name.equals(binName, ignoreCase = true) && Platform.isExecutableFile(it) }
+                ?.let { return it }
         }
-        val pathDirs = System.getenv("PATH").orEmpty().split(File.pathSeparator)
-        for (d in pathDirs) {
-            val f = File(d, name)
-            if (f.isFile && f.canExecute()) return f
+        val pathEnv = System.getenv("PATH") ?: System.getenv("Path").orEmpty()
+        for (d in pathEnv.split(File.pathSeparator)) {
+            if (d.isBlank()) continue
+            val f = File(d, binName)
+            if (Platform.isExecutableFile(f)) return f
         }
         return null
     }
@@ -263,7 +287,7 @@ class MediaEngines {
             val apiUrl = "https" + "://api.github.com/repos/leejet/stable-diffusion.cpp/releases?per_page=8"
             val req = Request.Builder()
                 .url(apiUrl)
-                .header("User-Agent", "SaMu-Lab-Linux")
+                .header("User-Agent", "SaMu-Lab-Desktop")
                 .header("Accept", "application/vnd.github+json")
                 .build()
 
@@ -281,53 +305,70 @@ class MediaEngines {
                         val a = assets.getJSONObject(i)
                         val name = a.optString("name", "").lowercase()
                         val url = a.optString("browser_download_url", "")
-                        if (!name.contains("linux") && !name.contains("ubuntu")) continue
                         if (!name.endsWith(".zip") && !name.endsWith(".tar.gz")) continue
                         if (name.contains("arm64") || name.contains("aarch64")) continue
-                        if (hw.hasVulkan && name.contains("vulkan")) {
-                            bestUrl = url
-                            break
-                        }
-                        if (fallbackUrl == null && !name.contains("cuda") && !name.contains("rocm") && !name.contains("sycl")) {
-                            fallbackUrl = url
+                        if (Platform.isWindows) {
+                            if (!name.contains("win")) continue
+                            if (hw.hasVulkan && name.contains("vulkan")) {
+                                bestUrl = url
+                                break
+                            }
+                            if (fallbackUrl == null && (name.contains("avx2") || name.contains("noavx") || name.contains("cpu")) &&
+                                !name.contains("cuda") && !name.contains("rocm") && !name.contains("sycl")
+                            ) {
+                                fallbackUrl = url
+                            }
+                        } else {
+                            if (!name.contains("linux") && !name.contains("ubuntu")) continue
+                            if (hw.hasVulkan && name.contains("vulkan")) {
+                                bestUrl = url
+                                break
+                            }
+                            if (fallbackUrl == null && !name.contains("cuda") && !name.contains("rocm") && !name.contains("sycl")) {
+                                fallbackUrl = url
+                            }
                         }
                     }
                     if (bestUrl != null) break
                 }
-                bestUrl ?: fallbackUrl ?: throw Exception("No compatible Linux stable-diffusion.cpp binary found")
+                bestUrl ?: fallbackUrl ?: throw Exception("No compatible stable-diffusion.cpp binary found for ${Platform.osName}")
             }
 
             val archive = File(sdDir, if (assetUrl.endsWith(".zip")) "sd.zip" else "sd.tar.gz")
             downloadToFile(assetUrl, archive)
             onProgress("Extracting Image/Video engine...")
-            extractArchive(archive, sdDir)
+            Platform.extractArchive(archive, sdDir)
             runCatching { archive.delete() }
 
+            val sdCliName = Platform.exeName("sd-cli")
+            val sdName = Platform.exeName("sd")
             val bin = sdDir.walkTopDown().firstOrNull {
-                it.isFile && (it.name == "sd-cli" || it.name == "sd")
+                it.isFile && (it.name.equals(sdCliName, ignoreCase = true) || it.name.equals(sdName, ignoreCase = true))
             } ?: throw Exception("sd binary not found inside downloaded archive")
 
-            bin.setExecutable(true, false)
-            runCatching { ProcessBuilder("chmod", "+x", bin.absolutePath).start().waitFor() }
+            Platform.makeExecutable(bin)
             bin
         }
     }
 
     private fun ensurePiperBinary(onProgress: (String) -> Unit): Result<File> {
         findBinary("piper", piperDir)?.let { return Result.success(it) }
-        piperDir.walkTopDown().firstOrNull { it.isFile && it.name == "piper" && it.canExecute() }
-            ?.let { return Result.success(it) }
         findBinary("piper")?.let { return Result.success(it) }
 
         return runCatching {
             piperDir.mkdirs()
             onProgress("Downloading Neural Audio TTS engine (Piper)...")
-            val arch = System.getProperty("os.arch").orEmpty().lowercase()
-            val target = if (arch.contains("aarch64") || arch.contains("arm64")) "piper_linux_aarch64.tar.gz" else "piper_linux_x86_64.tar.gz"
+            val target = if (Platform.isWindows) {
+                "piper_windows_amd64.zip"
+            } else if (Platform.isArm64) {
+                "piper_linux_aarch64.tar.gz"
+            } else {
+                "piper_linux_x86_64.tar.gz"
+            }
             val apiUrl = "https" + "://api.github.com/repos/rhasspy/piper/releases?per_page=8"
             val req = Request.Builder()
                 .url(apiUrl)
-                .header("User-Agent", "SaMu-Lab-Linux")
+                .header("User-Agent", "SaMu-Lab-Desktop")
                 .header("Accept", "application/vnd.github+json")
                 .build()
 
@@ -353,48 +394,25 @@ class MediaEngines {
             val archive = File(piperDir, target)
             downloadToFile(assetUrl, archive)
             onProgress("Extracting Piper TTS engine...")
-            extractArchive(archive, piperDir)
+            Platform.extractArchive(archive, piperDir)
             runCatching { archive.delete() }
 
-            val bin = piperDir.walkTopDown().firstOrNull { it.isFile && it.name == "piper" }
-                ?: throw Exception("piper executable not found in archive")
-            bin.setExecutable(true, false)
-            runCatching { ProcessBuilder("chmod", "+x", bin.absolutePath).start().waitFor() }
+            val piperBinName = Platform.exeName("piper")
+            val bin = piperDir.walkTopDown().firstOrNull { it.isFile && it.name.equals(piperBinName, ignoreCase = true) }
+                ?: throw Exception("$piperBinName not found in archive")
+            Platform.makeExecutable(bin)
             bin
         }
     }
 
     private fun downloadToFile(url: String, dest: File) {
-        val req = Request.Builder().url(url).header("User-Agent", "SaMu-Lab-Linux").build()
+        val req = Request.Builder().url(url).header("User-Agent", "SaMu-Lab-Desktop").build()
         dlClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw Exception("Download failed: HTTP ${resp.code}")
             val body = resp.body ?: throw Exception("Empty download body")
             body.byteStream().use { input ->
                 dest.outputStream().use { output -> input.copyTo(output) }
             }
-        }
-    }
-
-    private fun extractArchive(archive: File, destDir: File) {
-        if (archive.name.endsWith(".zip", ignoreCase = true)) {
-            ZipInputStream(archive.inputStream().buffered()).use { zis ->
-                var entry = zis.nextEntry
-                while (entry != null) {
-                    val out = File(destDir, entry.name)
-                    if (entry.isDirectory) {
-                        out.mkdirs()
-                    } else {
-                        out.parentFile?.mkdirs()
-                        Files.copy(zis, out.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    }
-                    entry = zis.nextEntry
-                }
-            }
-        } else {
-            val proc = ProcessBuilder("tar", "-xzf", archive.absolutePath, "-C", destDir.absolutePath)
-                .redirectErrorStream(true).start()
-            val code = proc.waitFor()
-            if (code != 0) throw Exception("Archive extraction failed (exit $code)")
         }
     }
 }

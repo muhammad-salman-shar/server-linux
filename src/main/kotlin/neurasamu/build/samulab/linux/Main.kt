@@ -19,7 +19,12 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import org.jetbrains.skia.Image as SkiaImage
 import java.awt.Dimension
 
-fun main() = application {
+fun main() {
+    // On Windows 7 / 8 / 8.1, force Software rendering fallback so DirectX 12 is never required
+    if (Platform.isLegacyWindows && System.getProperty("skiko.renderApi").isNullOrBlank()) {
+        System.setProperty("skiko.renderApi", "SOFTWARE")
+    }
+    application {
     val state = rememberWindowState(size = DpSize(1100.dp, 750.dp))
     val shortcuts = remember { MutableSharedFlow<ShortcutAction>(extraBufferCapacity = 16) }
     val windowIcon = remember {
@@ -66,4 +71,5 @@ fun main() = application {
         }
         App(shortcuts = shortcuts)
     }
+}
 }

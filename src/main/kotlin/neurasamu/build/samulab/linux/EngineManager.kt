@@ -40,13 +40,16 @@ class EngineManager {
     @Volatile var capabilities: EngineCapabilities = EngineCapabilities()
         private set
 
+    private val serverBinName: String
+        get() = Platform.exeName("llama-server")
+
     val isRunning: Boolean
         get() = running.get() && process?.isAlive == true
 
     val isBinaryInstalled: Boolean
         get() {
-            val binary = SettingsStore.appDir.resolve("llama-server").toFile()
-            return binary.exists() && binary.canExecute()
+            val binary = SettingsStore.appDir.resolve(serverBinName).toFile()
+            return Platform.isExecutableFile(binary)
         }
 
     fun ensureEngineAndStart(
@@ -79,46 +82,50 @@ class EngineManager {
         }
     }
 
+    private fun isEngineLibrary(name: String): Boolean {
+        val l = name.lowercase()
+        return if (Platform.isWindows) {
+            l == serverBinName.lowercase() || l.endsWith(".dll")
+        } else {
+            l == serverBinName.lowercase() || l.contains(".so")
+        }
+    }
+
     private fun syncFromBundledResources(): Boolean {
         val resDirProp = System.getProperty("compose.application.resources.dir") ?: return false
         val resRoot = File(resDirProp)
         if (!resRoot.exists()) return false
 
-        val bundledTar = resRoot.walkTopDown().find { it.isFile && it.name == "llama-engine.tar.gz" }
-        if (bundledTar != null) {
+        val archiveName = if (Platform.isWindows) "llama-engine.zip" else "llama-engine.tar.gz"
+        val bundledArchive = resRoot.walkTopDown().find { it.isFile && it.name == archiveName }
+        if (bundledArchive != null) {
             SettingsStore.ensureDirs()
             val stampFile = SettingsStore.appDir.resolve(".llama-engine.stamp").toFile()
-            val currentStamp = "${bundledTar.length()}_${bundledTar.lastModified()}"
-            val destBin = SettingsStore.appDir.resolve("llama-server").toFile()
-            if (destBin.exists() && destBin.canExecute() && stampFile.exists() &&
+            val currentStamp = "${bundledArchive.name}_${bundledArchive.length()}_${bundledArchive.lastModified()}"
+            val destBin = SettingsStore.appDir.resolve(serverBinName).toFile()
+            if (Platform.isExecutableFile(destBin) && stampFile.exists() &&
                 runCatching { stampFile.readText().trim() == currentStamp }.getOrDefault(false)
             ) {
                 return true
             }
-            val proc = ProcessBuilder(
-                "tar", "-xzf", bundledTar.absolutePath, "-C", SettingsStore.appDir.toAbsolutePath().toString()
-            ).redirectErrorStream(true).start()
-            if (proc.waitFor() == 0) {
-                destBin.setExecutable(true, false)
-                runCatching { ProcessBuilder("chmod", "+x", destBin.absolutePath).start().waitFor() }
-                if (destBin.exists() && destBin.canExecute()) {
-                    runCatching { stampFile.writeText(currentStamp) }
-                    return true
-                }
+            Platform.extractArchive(bundledArchive, SettingsStore.appDir.toFile())
+            Platform.makeExecutable(destBin)
+            if (Platform.isExecutableFile(destBin)) {
+                runCatching { stampFile.writeText(currentStamp) }
+                return true
             }
         }
 
-        val bundledBin = resRoot.walkTopDown().find { it.isFile && it.name == "llama-server" }
+        val bundledBin = resRoot.walkTopDown().find { it.isFile && it.name.equals(serverBinName, ignoreCase = true) }
             ?: return false
 
         SettingsStore.ensureDirs()
         val srcDir = bundledBin.parentFile
         srcDir.listFiles()?.forEach { file ->
-            val shouldCopy = file.name == "llama-server" || file.name.contains(".so")
-            if (shouldCopy && (file.isFile || Files.isSymbolicLink(file.toPath()))) {
+            if (isEngineLibrary(file.name) && (file.isFile || Files.isSymbolicLink(file.toPath()))) {
                 val dest = SettingsStore.appDir.resolve(file.name)
                 Files.deleteIfExists(dest)
-                if (Files.isSymbolicLink(file.toPath())) {
+                if (!Platform.isWindows && Files.isSymbolicLink(file.toPath())) {
                     val target = Files.readSymbolicLink(file.toPath())
                     runCatching { Files.createSymbolicLink(dest, target) }
                         .onFailure { Files.copy(file.toPath(), dest, StandardCopyOption.REPLACE_EXISTING) }
@@ -127,15 +134,23 @@ class EngineManager {
                 }
             }
         }
-        val destBin = SettingsStore.appDir.resolve("llama-server").toFile()
-        destBin.setExecutable(true, false)
-        runCatching { ProcessBuilder("chmod", "+x", destBin.absolutePath).start().waitFor() }
-        return destBin.exists() && destBin.canExecute()
+        val destBin = SettingsStore.appDir.resolve(serverBinName).toFile()
+        Platform.makeExecutable(destBin)
+        return Platform.isExecutableFile(destBin)
     }
 
     private fun killStrayEngineOnPort8091() {
         runCatching {
-            ProcessBuilder("pkill", "-f", "llama-server.*--port 8091").start().waitFor(2, TimeUnit.SECONDS)
+            if (Platform.isWindows) {
+                val ps = "Get-CimInstance Win32_Process -Filter \"Name='llama-server.exe'\" | " +
+                    "Where-Object { \$_.CommandLine -like '*8091*' } | " +
+                    "ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }"
+                ProcessBuilder("powershell", "-NoProfile", "-Command", ps)
+                    .start().waitFor(3, TimeUnit.SECONDS)
+            } else {
+                ProcessBuilder("pkill", "-f", "llama-server.*--port 8091")
+                    .start().waitFor(2, TimeUnit.SECONDS)
+            }
         }
     }
 
@@ -174,8 +189,8 @@ class EngineManager {
             return
         }
 
-        val binary = SettingsStore.appDir.resolve("llama-server").toFile()
-        if (!binary.exists() || !binary.canExecute()) {
+        val binary = SettingsStore.appDir.resolve(serverBinName).toFile()
+        if (!Platform.isExecutableFile(binary)) {
             starting.set(false)
             onReady(false, "Engine binary not ready at ${binary.absolutePath}")
             return
@@ -186,7 +201,6 @@ class EngineManager {
             return
         }
 
-        // Clean any orphaned llama-server process still holding port 8091
         killStrayEngineOnPort8091()
 
         val safeSettings = settings.validated()
@@ -211,13 +225,11 @@ class EngineManager {
             "--jinja"
         )
 
-        // Vision / multimodal projector support (--mmproj)
         if (profile.hasVision()) {
             cmd.add("--mmproj")
             cmd.add(File(profile.mmprojPath).absolutePath)
         }
 
-        // Extra LoRA files if attached
         profile.extraFiles
             .filter { it.role.equals("lora", ignoreCase = true) && File(it.path).isFile }
             .forEach {
@@ -225,14 +237,12 @@ class EngineManager {
                 cmd.add(File(it.path).absolutePath)
             }
 
-        // GPU offload only when explicitly set or GPU detected
         val ngl = if (profile.gpuLayers >= 0) profile.gpuLayers else hw.recommendedGpuLayers
         if (ngl > 0) {
             cmd.add("-ngl")
             cmd.add(ngl.toString())
         }
 
-        // Optional user CLI flags
         if (profile.customArgs.isNotBlank()) {
             profile.customArgs.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { cmd.add(it) }
         }
@@ -249,8 +259,13 @@ class EngineManager {
             pb.directory(SettingsStore.appDir.toFile())
             val env = pb.environment()
             val appDirPath = SettingsStore.appDir.toAbsolutePath().toString()
-            val existingLd = env["LD_LIBRARY_PATH"].orEmpty()
-            env["LD_LIBRARY_PATH"] = if (existingLd.isBlank()) appDirPath else "$appDirPath:$existingLd"
+            if (Platform.isWindows) {
+                val existingPath = env["Path"] ?: env["PATH"].orEmpty()
+                env["Path"] = if (existingPath.isBlank()) appDirPath else "$appDirPath;$existingPath"
+            } else {
+                val existingLd = env["LD_LIBRARY_PATH"].orEmpty()
+                env["LD_LIBRARY_PATH"] = if (existingLd.isBlank()) appDirPath else "$appDirPath:$existingLd"
+            }
             pb.redirectErrorStream(true)
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
 
@@ -395,17 +410,22 @@ class EngineManager {
             return
         }
         scope.launch {
-            val tarFile = SettingsStore.appDir.resolve("llama.tar.gz").toFile()
+            val archiveExt = if (Platform.isWindows) ".zip" else ".tar.gz"
+            val archiveFile = SettingsStore.appDir.resolve("llama$archiveExt").toFile()
             val extractRoot = SettingsStore.appDir.resolve("extract_tmp").toFile()
             try {
                 SettingsStore.ensureDirs()
-                val arch = System.getProperty("os.arch").orEmpty().lowercase()
-                val isArm = arch.contains("aarch64") || arch.contains("arm64")
-                val targetSuffix = if (isArm) "-bin-ubuntu-arm64.tar.gz" else "-bin-ubuntu-x64.tar.gz"
+                val targetSuffixes = if (Platform.isWindows) {
+                    if (Platform.isArm64) listOf("-bin-win-arm64.zip", "-bin-win-cpu-arm64.zip")
+                    else listOf("-bin-win-cpu-x64.zip", "-bin-win-avx2-x64.zip")
+                } else {
+                    if (Platform.isArm64) listOf("-bin-ubuntu-arm64.tar.gz")
+                    else listOf("-bin-ubuntu-x64.tar.gz")
+                }
 
                 val client = OkHttpClient.Builder()
                     .connectTimeout(30, TimeUnit.SECONDS)
-                    .readTimeout(120, TimeUnit.SECONDS)
+                    .readTimeout(180, TimeUnit.SECONDS)
                     .followRedirects(true)
                     .build()
 
@@ -413,7 +433,7 @@ class EngineManager {
                 val apiUrl = "https" + "://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10"
                 val apiReq = Request.Builder()
                     .url(apiUrl)
-                    .header("User-Agent", "SaMu-Lab-Linux")
+                    .header("User-Agent", "SaMu-Lab-Desktop")
                     .header("Accept", "application/vnd.github+json")
                     .build()
 
@@ -425,31 +445,34 @@ class EngineManager {
                         val rel = releases.getJSONObject(r)
                         if (rel.optBoolean("draft", false)) continue
                         val assets = rel.optJSONArray("assets") ?: continue
-                        for (i in 0 until assets.length()) {
-                            val asset = assets.getJSONObject(i)
-                            val name = asset.optString("name", "")
-                            if (name.startsWith("llama-") && name.endsWith(targetSuffix)) {
-                                found = asset.optString("browser_download_url", "")
-                                break
+                        for (suffix in targetSuffixes) {
+                            for (i in 0 until assets.length()) {
+                                val asset = assets.getJSONObject(i)
+                                val name = asset.optString("name", "")
+                                if (name.startsWith("llama-") && name.endsWith(suffix)) {
+                                    found = asset.optString("browser_download_url", "")
+                                    break
+                                }
                             }
+                            if (!found.isNullOrBlank()) break
                         }
                         if (!found.isNullOrBlank()) break
                     }
                     found?.takeIf { it.isNotBlank() }
-                        ?: throw Exception("No Linux binary matching llama-*$targetSuffix found")
+                        ?: throw Exception("No compatible binary found for ${Platform.osName} (${Platform.osArch})")
                 }
 
-                onProgress("Downloading engine ($arch)...")
+                onProgress("Downloading engine (${Platform.osArch})...")
                 val dlReq = Request.Builder()
                     .url(downloadUrl)
-                    .header("User-Agent", "SaMu-Lab-Linux")
+                    .header("User-Agent", "SaMu-Lab-Desktop")
                     .build()
 
                 client.newCall(dlReq).execute().use { resp ->
                     if (!resp.isSuccessful) throw Exception("Download failed: HTTP ${resp.code}")
                     val body = resp.body ?: throw Exception("Empty download body")
                     body.byteStream().use { input ->
-                        tarFile.outputStream().use { output ->
+                        archiveFile.outputStream().use { output ->
                             input.copyTo(output)
                         }
                     }
@@ -458,27 +481,18 @@ class EngineManager {
                 onProgress("Extracting engine...")
                 if (extractRoot.exists()) extractRoot.deleteRecursively()
                 extractRoot.mkdirs()
-
-                val tarProc = ProcessBuilder("tar", "-xzf", tarFile.absolutePath, "-C", extractRoot.absolutePath)
-                    .redirectErrorStream(true)
-                    .start()
-                val tarExit = tarProc.waitFor()
-                if (tarExit != 0) {
-                    val out = runCatching { tarProc.inputStream.bufferedReader().readText() }.getOrDefault("")
-                    throw Exception("Extraction failed (exit $tarExit): ${out.take(200)}")
-                }
+                Platform.extractArchive(archiveFile, extractRoot)
 
                 onProgress("Setting up engine...")
-                val bin = extractRoot.walkTopDown().find { it.isFile && it.name == "llama-server" }
-                    ?: throw Exception("llama-server binary not found in archive")
+                val bin = extractRoot.walkTopDown().find { it.isFile && it.name.equals(serverBinName, ignoreCase = true) }
+                    ?: throw Exception("$serverBinName not found in archive")
 
                 val binDir = bin.parentFile
                 binDir.listFiles()?.forEach { file ->
-                    val shouldCopy = file.name == "llama-server" || file.name.contains(".so")
-                    if (shouldCopy && (file.isFile || Files.isSymbolicLink(file.toPath()))) {
+                    if (isEngineLibrary(file.name) && (file.isFile || Files.isSymbolicLink(file.toPath()))) {
                         val dest = SettingsStore.appDir.resolve(file.name)
                         Files.deleteIfExists(dest)
-                        if (Files.isSymbolicLink(file.toPath())) {
+                        if (!Platform.isWindows && Files.isSymbolicLink(file.toPath())) {
                             val linkTarget = Files.readSymbolicLink(file.toPath())
                             runCatching { Files.createSymbolicLink(dest, linkTarget) }
                                 .onFailure { Files.copy(file.toPath(), dest, StandardCopyOption.REPLACE_EXISTING) }
@@ -488,19 +502,18 @@ class EngineManager {
                     }
                 }
 
-                val destBin = SettingsStore.appDir.resolve("llama-server").toFile()
-                destBin.setExecutable(true, false)
-                runCatching { ProcessBuilder("chmod", "+x", destBin.absolutePath).start().waitFor() }
+                val destBin = SettingsStore.appDir.resolve(serverBinName).toFile()
+                Platform.makeExecutable(destBin)
 
-                if (!destBin.exists() || !destBin.canExecute()) {
-                    throw Exception("Failed to mark engine executable")
+                if (!Platform.isExecutableFile(destBin)) {
+                    throw Exception("Failed to prepare $serverBinName")
                 }
 
                 onDone(true, null)
             } catch (e: Exception) {
                 onDone(false, e.message ?: "Unknown error")
             } finally {
-                runCatching { tarFile.delete() }
+                runCatching { archiveFile.delete() }
                 runCatching { extractRoot.deleteRecursively() }
                 downloading.set(false)
             }

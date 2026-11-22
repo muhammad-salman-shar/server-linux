@@ -1,4 +1,4 @@
-name: Build SaMu Lab (.deb)
+name: Build SaMu Lab (Linux & Windows)
 
 on:
   push:
@@ -39,8 +39,9 @@ jobs:
           import json, os, shutil, subprocess, tempfile, urllib.request
           from pathlib import Path
 
+          api_url = "https" + "://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10"
           req = urllib.request.Request(
-              "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10",
+              api_url,
               headers={
                   "User-Agent": "SaMu-Lab-CI",
                   "Accept": "application/vnd.github+json",
@@ -58,13 +59,13 @@ jobs:
                   name = a.get("name", "")
                   if name.startswith("llama-") and name.endswith("-bin-ubuntu-x64.tar.gz"):
                       asset_url = a["browser_download_url"]
-                      print("Selected release:", rel.get("tag_name"), "->", name)
+                      print("Selected Linux release:", rel.get("tag_name"), "->", name)
                       break
               if asset_url:
                   break
 
           if not asset_url:
-              raise SystemExit("No llama-*-bin-ubuntu-x64.tar.gz asset found in recent llama.cpp releases")
+              raise SystemExit("No llama-*-bin-ubuntu-x64.tar.gz asset found")
 
           with tempfile.TemporaryDirectory() as tmp:
               tmp_path = Path(tmp)
@@ -96,7 +97,7 @@ jobs:
               out_dir.mkdir(parents=True, exist_ok=True)
               out_tar = out_dir / "llama-engine.tar.gz"
               subprocess.run(["tar", "-czf", str(out_tar), "-C", str(stage_dir), "."], check=True)
-              print(f"Bundled engine archive: {out_tar} ({out_tar.stat().st_size / (1024*1024):.1f} MB)")
+              print(f"Bundled Linux engine: {out_tar} ({out_tar.stat().st_size / (1024*1024):.1f} MB)")
           PYEOF
           ls -lh resources/linux-x64/llama-engine.tar.gz
 
@@ -108,8 +109,6 @@ jobs:
           if [ -n "$EMOJI_TTF" ] && [ -f "$EMOJI_TTF" ]; then
             cp "$EMOJI_TTF" src/main/resources/fonts/emoji.ttf
             ls -lh src/main/resources/fonts/emoji.ttf
-          else
-            echo "Warning: NotoColorEmoji.ttf not found, continuing with system fallback"
           fi
 
       - name: Build .deb
@@ -123,7 +122,143 @@ jobs:
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: samu-lab-deb
+          name: samu-lab-linux-deb
           path: build/compose/binaries/main/deb/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Ensure WiX v3 for MSI packaging
+        shell: pwsh
+        run: |
+          $wix = Get-Command candle.exe -ErrorAction SilentlyContinue
+          if (-not $wix) {
+            $existing = Get-ChildItem "C:\Program Files (x86)\WiX Toolset v3*\bin\candle.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($existing) {
+              $existing.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              Write-Host "Found preinstalled WiX at $($existing.DirectoryName)"
+            } else {
+              Write-Host "Downloading WiX v3.14 binaries..."
+              $wixDir = "$env:RUNNER_TEMP\wix314"
+              New-Item -ItemType Directory -Force -Path $wixDir | Out-Null
+              $wixUrl = "https" + "://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
+              Invoke-WebRequest -Uri $wixUrl -OutFile "$wixDir\wix.zip"
+              Expand-Archive -Path "$wixDir\wix.zip" -DestinationPath $wixDir -Force
+              $wixDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              Write-Host "Installed WiX v3.14 to $wixDir"
+            }
+          }
+
+      - name: Bundle latest llama-server.exe (Windows x64)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - << 'PYEOF'
+          import json, os, shutil, tempfile, urllib.request, zipfile
+          from pathlib import Path
+
+          api_url = "https" + "://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10"
+          req = urllib.request.Request(
+              api_url,
+              headers={
+                  "User-Agent": "SaMu-Lab-CI",
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              releases = json.loads(resp.read().decode())
+
+          asset_url = None
+          preferred_suffixes = ["-bin-win-cpu-x64.zip", "-bin-win-avx2-x64.zip"]
+          for rel in releases:
+              if rel.get("draft"):
+                  continue
+              for suf in preferred_suffixes:
+                  for a in rel.get("assets", []):
+                      name = a.get("name", "")
+                      if name.startswith("llama-") and name.endswith(suf):
+                          asset_url = a["browser_download_url"]
+                          print("Selected Windows release:", rel.get("tag_name"), "->", name)
+                          break
+                  if asset_url:
+                      break
+              if asset_url:
+                  break
+
+          if not asset_url:
+              raise SystemExit("No llama-*-bin-win-cpu-x64.zip asset found")
+
+          with tempfile.TemporaryDirectory() as tmp:
+              tmp_path = Path(tmp)
+              archive = tmp_path / "llama-win.zip"
+              dl_req = urllib.request.Request(asset_url, headers={"User-Agent": "SaMu-Lab-CI"})
+              with urllib.request.urlopen(dl_req, timeout=180) as r, open(archive, "wb") as f:
+                  shutil.copyfileobj(r, f)
+
+              extract_dir = tmp_path / "extracted"
+              extract_dir.mkdir()
+              with zipfile.ZipFile(archive, "r") as zf:
+                  zf.extractall(extract_dir)
+
+              bins = list(extract_dir.rglob("llama-server.exe"))
+              if not bins:
+                  raise SystemExit("llama-server.exe not found in archive")
+              bin_dir = bins[0].parent
+
+              out_dir = Path("resources/windows-x64")
+              out_dir.mkdir(parents=True, exist_ok=True)
+              out_zip = out_dir / "llama-engine.zip"
+              with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as oz:
+                  for item in bin_dir.iterdir():
+                      if item.is_file() and (item.name.lower() == "llama-server.exe" or item.name.lower().endswith(".dll")):
+                          oz.write(item, arcname=item.name)
+              print(f"Bundled Windows engine: {out_zip} ({out_zip.stat().st_size / (1024*1024):.1f} MB)")
+          PYEOF
+
+      - name: Build Windows MSI & Portable App
+        shell: pwsh
+        run: gradle packageMsi createDistributable --no-daemon --stacktrace
+
+      - name: Create Windows Portable ZIP
+        shell: pwsh
+        run: |
+          $appFolder = Get-ChildItem "build\compose\binaries\main\app" -Directory | Select-Object -First 1
+          if (-not $appFolder) { throw "Portable app folder not found!" }
+          $zipPath = "build\SaMu-Lab-Windows-x64-Portable.zip"
+          Compress-Archive -Path "$($appFolder.FullName)\*" -DestinationPath $zipPath -Force
+          Get-Item $zipPath
+          Get-ChildItem "build\compose\binaries\main\msi\*.msi"
+
+      - name: Upload Windows MSI Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: samu-lab-windows-msi
+          path: build/compose/binaries/main/msi/*.msi
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows Portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: samu-lab-windows-portable-zip
+          path: build/SaMu-Lab-Windows-x64-Portable.zip
           if-no-files-found: error
           retention-days: 30

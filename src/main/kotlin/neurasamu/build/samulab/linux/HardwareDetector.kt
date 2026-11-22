@@ -1,6 +1,7 @@
 package neurasamu.build.samulab.linux
 
 import java.io.File
+import java.lang.management.ManagementFactory
 import java.util.concurrent.TimeUnit
 
 data class HardwareProfile(
@@ -76,44 +77,73 @@ object HardwareDetector {
     }
 
     private fun readTotalRamGb(): Int {
-        return runCatching {
-            val memInfo = File("/proc/meminfo")
-            if (!memInfo.exists()) return 8
-            val line = memInfo.useLines { seq -> seq.firstOrNull { it.startsWith("MemTotal:") } }
-                ?: return 8
-            val kb = line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: return 8
-            ((kb / 1024.0 / 1024.0) + 0.5).toInt().coerceAtLeast(1)
-        }.getOrDefault(8)
+        val beanRam = runCatching {
+            val bean = ManagementFactory.getOperatingSystemMXBean()
+            if (bean is com.sun.management.OperatingSystemMXBean) {
+                val bytes = bean.totalMemorySize
+                if (bytes > 0L) ((bytes / (1024.0 * 1024.0 * 1024.0)) + 0.4).toInt().coerceAtLeast(1) else 0
+            } else 0
+        }.getOrDefault(0)
+        if (beanRam > 0) return beanRam
+
+        if (Platform.isLinux) {
+            return runCatching {
+                val memInfo = File("/proc/meminfo")
+                if (!memInfo.exists()) return 8
+                val line = memInfo.useLines { seq -> seq.firstOrNull { it.startsWith("MemTotal:") } }
+                    ?: return 8
+                val kb = line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: return 8
+                ((kb / 1024.0 / 1024.0) + 0.5).toInt().coerceAtLeast(1)
+            }.getOrDefault(8)
+        }
+        return 8
     }
 
     private fun detectNvidiaGpu(): Pair<String, Int>? {
-        return runCatching {
-            val proc = ProcessBuilder(
+        val candidates = if (Platform.isWindows) {
+            listOf(
                 "nvidia-smi",
-                "--query-gpu=name,memory.total",
-                "--format=csv,noheader,nounits"
-            ).redirectErrorStream(true).start()
-            val finished = proc.waitFor(2, TimeUnit.SECONDS)
-            if (!finished || proc.exitValue() != 0) {
-                proc.destroyForcibly()
-                return null
-            }
-            val line = proc.inputStream.bufferedReader().readLine()?.trim().orEmpty()
-            if (line.isBlank()) return null
-            val parts = line.split(",")
-            val name = parts.getOrNull(0)?.trim().orEmpty().ifBlank { "NVIDIA GPU" }
-            val mb = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0
-            val gb = ((mb / 1024.0) + 0.4).toInt().coerceAtLeast(0)
-            name to gb
-        }.getOrNull()
+                "C:\\Windows\\System32\\nvidia-smi.exe",
+                "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"
+            )
+        } else {
+            listOf("nvidia-smi")
+        }
+        for (bin in candidates) {
+            val res = runCatching {
+                val proc = ProcessBuilder(
+                    bin,
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits"
+                ).redirectErrorStream(true).start()
+                val finished = proc.waitFor(2, TimeUnit.SECONDS)
+                if (!finished || proc.exitValue() != 0) {
+                    proc.destroyForcibly()
+                    return@runCatching null
+                }
+                val line = proc.inputStream.bufferedReader().readLine()?.trim().orEmpty()
+                if (line.isBlank()) return@runCatching null
+                val parts = line.split(",")
+                val name = parts.getOrNull(0)?.trim().orEmpty().ifBlank { "NVIDIA GPU" }
+                val mb = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0
+                val gb = ((mb / 1024.0) + 0.4).toInt().coerceAtLeast(0)
+                name to gb
+            }.getOrNull()
+            if (res != null) return res
+        }
+        return null
     }
 
     private fun detectVulkanGpu(): Boolean {
+        if (Platform.isWindows) {
+            if (Platform.isLegacyWindows) return false
+            val sysRoot = System.getenv("SystemRoot") ?: "C:\\Windows"
+            return File(sysRoot, "System32\\vulkan-1.dll").isFile
+        }
         val driRender = File("/dev/dri/renderD128").exists()
         if (!driRender) return false
         return runCatching {
-            val proc = ProcessBuilder("sh", "-c", "command -v vulkaninfo >/dev/null 2>&1")
-                .start()
+            val proc = ProcessBuilder("sh", "-c", "command -v vulkaninfo >/dev/null 2>&1").start()
             proc.waitFor(2, TimeUnit.SECONDS) && proc.exitValue() == 0
         }.getOrDefault(false)
     }

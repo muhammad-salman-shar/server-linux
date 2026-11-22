@@ -29,7 +29,8 @@ compose.desktop {
         mainClass = "neurasamu.build.samulab.linux.MainKt"
         nativeDistributions {
             targetFormats(
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi
             )
             includeAllModules = true
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
@@ -41,6 +42,14 @@ compose.desktop {
                 shortcut = true
                 menuGroup = "Development"
                 iconFile.set(project.file("assets/icon.png"))
+            }
+            windows {
+                menuGroup = "SaMu Lab"
+                shortcut = true
+                perUserInstall = true
+                dirChooser = true
+                upgradeUuid = "7a4e8c91-5f2b-4d19-9c3a-8e6b12f04a55"
+                iconFile.set(project.file("assets/icon.ico"))
             }
         }
     }

@@ -213,7 +213,7 @@ data class AppSettings(
 }
 
 object SettingsStore {
-    val appDir: Path = Path.of(System.getProperty("user.home"), ".local", "share", "samu-lab")
+    val appDir: Path = Platform.appDataDir()
     private val settingsFile: Path = appDir.resolve("settings.json")
     private val modelsDir: Path = appDir.resolve("models")
     private val mediaDir: Path = appDir.resolve("media")

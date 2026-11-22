@@ -11,6 +11,7 @@ import java.net.NetworkInterface
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.Base64
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.Clip
 import javax.sound.sampled.LineEvent
@@ -21,17 +22,23 @@ fun getLocalIp(): String {
         val candidates = ifaces
             .filter { it.isUp && !it.isLoopback && !it.isVirtual }
             .flatMap { iface ->
+                val label = (iface.name + " " + (iface.displayName ?: "")).lowercase()
                 iface.inetAddresses.toList()
                     .filterIsInstance<Inet4Address>()
-                    .map { iface.name.lowercase() to it.hostAddress }
+                    .map { label to it.hostAddress }
             }
-        val preferred = candidates.firstOrNull { (name, ip) ->
+        val preferred = candidates.firstOrNull { (label, ip) ->
             !ip.startsWith("127.") &&
-                !name.startsWith("docker") &&
-                !name.startsWith("br-") &&
-                !name.startsWith("veth") &&
-                (name.startsWith("wl") || name.startsWith("en") || name.startsWith("eth") || name.startsWith("usb"))
-        } ?: candidates.firstOrNull { (_, ip) -> !ip.startsWith("127.") }
+                !ip.startsWith("169.254.") &&
+                !label.contains("docker") &&
+                !label.contains("br-") &&
+                !label.contains("veth") &&
+                !label.contains("virtual") &&
+                !label.contains("vmware") &&
+                !label.contains("vbox") &&
+                (label.contains("wl") || label.contains("wi-fi") || label.contains("wifi") ||
+                    label.contains("wireless") || label.contains("en") || label.contains("eth") || label.contains("usb"))
+        } ?: candidates.firstOrNull { (_, ip) -> !ip.startsWith("127.") && !ip.startsWith("169.254.") }
         preferred?.second
     }.getOrNull() ?: "127.0.0.1"
 }
@@ -46,6 +53,9 @@ fun openFilePicker(title: String, extensions: Set<String>? = null): File? {
     return runCatching {
         val dialog = FileDialog(null as Frame?, title, FileDialog.LOAD)
         if (!extensions.isNullOrEmpty()) {
+            if (Platform.isWindows) {
+                dialog.file = extensions.joinToString(";") { "*$it" }
+            }
             dialog.setFilenameFilter { _, name ->
                 val lower = name.lowercase()
                 extensions.any { lower.endsWith(it) }
@@ -95,6 +105,19 @@ fun saveBinaryFileDialog(title: String, defaultFilename: String, sourceFile: Fil
 
 fun openFileExternally(file: File): Boolean {
     if (!file.exists()) return false
+    if (Platform.isWindows) {
+        val desktopOk = runCatching {
+            if (Desktop.isDesktopSupported()) {
+                Desktop.getDesktop().open(file)
+                true
+            } else false
+        }.getOrDefault(false)
+        if (desktopOk) return true
+        return runCatching {
+            ProcessBuilder("cmd", "/c", "start", "\"\"", file.absolutePath).start()
+            true
+        }.getOrDefault(false)
+    }
     val launched = runCatching {
         ProcessBuilder("xdg-open", file.absolutePath).start()
         true
@@ -108,7 +131,12 @@ fun openFileExternally(file: File): Boolean {
     }.getOrDefault(false)
 }
 
-fun createLinuxDesktopShortcut(): Pair<Boolean, String> {
+fun createLinuxDesktopShortcut(): Pair<Boolean, String> = createDesktopShortcut()
+
+fun createDesktopShortcut(): Pair<Boolean, String> {
+    if (Platform.isWindows) {
+        return createWindowsDesktopShortcut()
+    }
     return runCatching {
         val home = System.getProperty("user.home")
         val desktopDir = Path.of(home, "Desktop").toFile()
@@ -158,6 +186,49 @@ fun createLinuxDesktopShortcut(): Pair<Boolean, String> {
     }
 }
 
+private fun createWindowsDesktopShortcut(): Pair<Boolean, String> {
+    return runCatching {
+        SettingsStore.ensureDirs()
+        val iconDest = SettingsStore.appDir.resolve("icon.ico").toFile()
+        Thread.currentThread().contextClassLoader.getResourceAsStream("icon.ico")?.use { input ->
+            iconDest.outputStream().use { output -> input.copyTo(output) }
+        }
+
+        val exePath = ProcessHandle.current().info().command().orElse("").let { cmd ->
+            if (cmd.lowercase().endsWith("samu-lab.exe") || cmd.lowercase().endsWith("samu lab.exe")) cmd
+            else {
+                val candidates = listOf(
+                    File(System.getProperty("user.dir"), "SaMu Lab.exe"),
+                    File(System.getProperty("user.dir"), "samu-lab.exe"),
+                    File("C:\\Program Files\\SaMu Lab\\SaMu Lab.exe"),
+                    File("C:\\Program Files\\samu-lab\\samu-lab.exe")
+                )
+                candidates.firstOrNull { it.isFile }?.absolutePath ?: cmd
+            }
+        }
+        if (exePath.isBlank()) return false to "Could not locate SaMu Lab executable."
+
+        val shortcutPath = File(File(System.getProperty("user.home"), "Desktop"), "SaMu Lab.lnk").absolutePath
+        val safeLnk = shortcutPath.replace("'", "''")
+        val safeExe = exePath.replace("'", "''")
+        val safeIcon = (if (iconDest.exists()) iconDest.absolutePath else exePath).replace("'", "''")
+
+        val ps = "\$ws = New-Object -ComObject WScript.Shell; " +
+            "\$s = \$ws.CreateShortcut('$safeLnk'); " +
+            "\$s.TargetPath = '$safeExe'; " +
+            "\$s.IconLocation = '$safeIcon'; " +
+            "\$s.Save()"
+
+        val proc = ProcessBuilder("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps)
+            .redirectErrorStream(true).start()
+        val code = proc.waitFor()
+        if (code == 0) true to "Desktop shortcut created at $shortcutPath"
+        else false to "Shortcut creation failed (exit $code)"
+    }.getOrElse { e ->
+        false to "Could not create shortcut: ${e.message}"
+    }
+}
+
 class LinuxTtsPlayer {
     @Volatile private var proc: Process? = null
     @Volatile var speakingMessageId: String? = null
@@ -183,6 +254,30 @@ class LinuxTtsPlayer {
             .replace(Regex("[#*_`>]"), " ")
             .trim()
         if (clean.isEmpty()) return "Nothing to read aloud."
+
+        if (Platform.isWindows) {
+            val b64 = Base64.getEncoder().encodeToString(clean.toByteArray(Charsets.UTF_8))
+            val ps = "Add-Type -AssemblyName System.Speech; " +
+                "\$t = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('$b64')); " +
+                "\$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; " +
+                "\$s.Speak(\$t)"
+            val started = runCatching {
+                val p = ProcessBuilder("powershell", "-NoProfile", "-Command", ps).start()
+                proc = p
+                speakingMessageId = messageId
+                onStateChange(messageId)
+                Thread {
+                    runCatching { p.waitFor() }
+                    if (proc === p) {
+                        proc = null
+                        speakingMessageId = null
+                        onStateChange(null)
+                    }
+                }.apply { isDaemon = true }.start()
+                true
+            }.getOrDefault(false)
+            return if (started) null else "Windows Speech failed to start."
+        }
 
         val commands = listOf(
             listOf("spd-say", "-w", clean),
@@ -261,7 +356,6 @@ class InAppAudioPlayer {
         val file = File(path)
         if (!file.exists()) return "Audio file not found."
 
-        // Try native JVM audio playback first (works natively for WAV/AIFF/AU)
         val nativeOk = runCatching {
             val ais = AudioSystem.getAudioInputStream(file)
             val c = AudioSystem.getClip()
@@ -281,12 +375,15 @@ class InAppAudioPlayer {
         }.getOrDefault(false)
         if (nativeOk) return null
 
-        // Fallback to Linux audio CLI players (handles mp3/ogg/flac/m4a)
-        val cmds = listOf(
-            listOf("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file.absolutePath),
-            listOf("paplay", file.absolutePath),
-            listOf("aplay", file.absolutePath)
-        )
+        val cmds = if (Platform.isWindows) {
+            listOf(listOf("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file.absolutePath))
+        } else {
+            listOf(
+                listOf("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file.absolutePath),
+                listOf("paplay", file.absolutePath),
+                listOf("aplay", file.absolutePath)
+            )
+        }
         for (cmd in cmds) {
             val started = runCatching {
                 val p = ProcessBuilder(cmd).start()
@@ -304,6 +401,7 @@ class InAppAudioPlayer {
             }.getOrDefault(false)
             if (started) return null
         }
-        return "Install ffmpeg or pulseaudio-utils to play this audio format."
+        if (Platform.isWindows && openFileExternally(file)) return null
+        return "Could not play this audio format directly."
     }
 }
