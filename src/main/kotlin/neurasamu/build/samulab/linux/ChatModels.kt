@@ -31,7 +31,7 @@ data class ApiConfig(
         fun fromJson(o: JSONObject): ApiConfig = ApiConfig(
             id = o.optString("id", UUID.randomUUID().toString()),
             label = o.optString("label", "Custom API"),
-            baseUrl = o.optString("baseUrl", ""),
+            baseUrl = sanitizeApiUrl(o.optString("baseUrl", "")),
             modelName = o.optString("modelName", ""),
             apiKey = o.optString("apiKey", ""),
             systemPrompt = o.optString("systemPrompt", ""),

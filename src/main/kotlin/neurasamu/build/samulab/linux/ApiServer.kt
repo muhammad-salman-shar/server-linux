@@ -27,6 +27,13 @@ class ApiServer(
 
     private val upstreamBase = "http://127.0.0.1:8091"
 
+    // CRITICAL: Never GZIP-buffer SSE streams so tokens flush live immediately!
+    override fun useGzipWhenAccepted(r: Response): Boolean {
+        val mime = r.mimeType.orEmpty()
+        if (mime.contains("text/event-stream", ignoreCase = true)) return false
+        return super.useGzipWhenAccepted(r)
+    }
+
     override fun serve(session: IHTTPSession): Response {
         if (session.method == Method.OPTIONS) {
             return withCors(newFixedLengthResponse(Response.Status.NO_CONTENT, "text/plain", ""))
@@ -96,6 +103,7 @@ class ApiServer(
 
         val upstreamReq = Request.Builder()
             .url("$upstreamBase/v1/chat/completions")
+            .header("Accept-Encoding", "identity")
             .post(rawBody.toRequestBody("application/json".toMediaType()))
             .build()
 
@@ -124,10 +132,10 @@ class ApiServer(
             monitor?.onRequestEnd("/v1/chat/completions", startNanos, false, "No upstream body")
             return errorJson(Response.Status.INTERNAL_ERROR, "No upstream body")
         }
-        val ctype = body.contentType()?.toString() ?: "text/event-stream"
+        val ctype = body.contentType()?.toString() ?: "text/event-stream; charset=utf-8"
         val inputStream = body.byteStream()
 
-        val pipeIn = PipedInputStream(64 * 1024)
+        val pipeIn = PipedInputStream(16 * 1024)
         val pipeOut = PipedOutputStream(pipeIn)
 
         Thread {
@@ -137,26 +145,25 @@ class ApiServer(
             var finishedOk = true
             try {
                 inputStream.use { input ->
-                    val buf = ByteArray(8192)
+                    val buf = ByteArray(512)
                     while (true) {
                         val n = input.read(buf)
                         if (n < 0) break
                         pipeOut.write(buf, 0, n)
                         pipeOut.flush()
 
-                        // Count SSE data frames as approximate generated tokens
                         val chunkStr = String(buf, 0, n, Charsets.UTF_8)
-                        var idx = chunkStr.indexOf("data: {")
+                        var idx = chunkStr.indexOf("data:")
                         var hits = 0
                         while (idx >= 0) {
                             hits++
-                            idx = chunkStr.indexOf("data: {", idx + 7)
+                            idx = chunkStr.indexOf("data:", idx + 5)
                         }
                         if (hits > 0) {
                             tokenEstimate += hits
                             pendingDelta += hits
                             val now = System.currentTimeMillis()
-                            if (now - lastUiReport >= 120L) {
+                            if (now - lastUiReport >= 60L) {
                                 monitor?.onStreamProgress(tokenEstimate, startNanos, pendingDelta)
                                 pendingDelta = 0
                                 lastUiReport = now
@@ -185,7 +192,8 @@ class ApiServer(
         }.start()
 
         val r = newChunkedResponse(Response.Status.OK, ctype, pipeIn)
-        r.addHeader("Cache-Control", "no-cache")
+        r.setGzipEncoding(false)
+        r.addHeader("Cache-Control", "no-cache, no-transform")
         r.addHeader("X-Accel-Buffering", "no")
         r.addHeader("Connection", "keep-alive")
         return r

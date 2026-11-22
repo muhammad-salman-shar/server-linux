@@ -13,13 +13,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -57,6 +55,7 @@ import kotlinx.coroutines.withContext
 import org.jetbrains.skia.Image as SkiaImage
 import java.io.File
 import java.nio.file.Files
+import java.util.Locale
 
 enum class MainTab { CHAT, SERVER }
 
@@ -109,7 +108,7 @@ private fun SaMuLabRoot(
 
     var activeTab by remember { mutableStateOf(MainTab.CHAT) }
 
-    // --- Shared Live Server State (stays alive across tabs) ---
+    // --- Shared Live Server State ---
     var serverSettings by remember { mutableStateOf(SettingsStore.load()) }
     val engine = remember { EngineManager() }
     val monitor = remember { ServerMonitor() }
@@ -123,7 +122,6 @@ private fun SaMuLabRoot(
     var serverStatusMsg by remember { mutableStateOf<String?>(null) }
     var serverStatusErr by remember { mutableStateOf(false) }
 
-    // Periodically refresh local IP when Wi-Fi/Hotspot connects or changes
     LaunchedEffect(Unit) {
         while (true) {
             delay(5000)
@@ -132,7 +130,7 @@ private fun SaMuLabRoot(
         }
     }
 
-    // --- Shared Live Chat State (stays alive across tabs) ---
+    // --- Shared Live Chat State ---
     val chatClient = remember { ChatClient() }
     val ttsPlayer = remember { LinuxTtsPlayer() }
     var speakingMsgId by remember { mutableStateOf<String?>(null) }
@@ -176,6 +174,7 @@ private fun SaMuLabRoot(
     var editingApi by remember { mutableStateOf<ApiConfig?>(null) }
     var showChatSettingsModal by remember { mutableStateOf(false) }
     var lightboxAttachment by remember { mutableStateOf<ChatAttachment?>(null) }
+    var selectingText by remember { mutableStateOf<String?>(null) }
     var renamingChat by remember { mutableStateOf<ChatSession?>(null) }
     var deletingChat by remember { mutableStateOf<ChatSession?>(null) }
     var deletingApi by remember { mutableStateOf<ApiConfig?>(null) }
@@ -199,7 +198,6 @@ private fun SaMuLabRoot(
         persistChats(updated)
     }
 
-    // --- Server Controls ---
     fun setServerStatus(msg: String?, error: Boolean = false) {
         serverStatusMsg = msg
         serverStatusErr = error
@@ -276,7 +274,6 @@ private fun SaMuLabRoot(
         )
     }
 
-    // --- Chat Controls ---
     fun runAssistantForChat(chatId: String, history: List<ChatMessage>) {
         val api = activeApi
         if (api == null) {
@@ -388,7 +385,6 @@ private fun SaMuLabRoot(
     val latestEditMsg by rememberUpdatedState(::editMessage)
     val latestRegenMsg by rememberUpdatedState(::regenerateFrom)
 
-    // Handle Desktop Keyboard Shortcuts
     LaunchedEffect(shortcuts) {
         shortcuts.collect { action ->
             when (action) {
@@ -409,6 +405,7 @@ private fun SaMuLabRoot(
                     showApiModal = false
                     showChatSettingsModal = false
                     lightboxAttachment = null
+                    selectingText = null
                     renamingChat = null
                     deletingChat = null
                     deletingApi = null
@@ -436,7 +433,7 @@ private fun SaMuLabRoot(
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // --- Global Top Header with Centered [ Chat | Server ] Switcher ---
+            // Global Top Header with Centered [ Chat | Server ] Switcher
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -444,7 +441,6 @@ private fun SaMuLabRoot(
                     .background(palette.surface)
                     .padding(horizontal = 14.dp)
             ) {
-                // Left Brand
                 Row(
                     modifier = Modifier.align(Alignment.CenterStart),
                     verticalAlignment = Alignment.CenterVertically,
@@ -465,7 +461,6 @@ private fun SaMuLabRoot(
                     )
                 }
 
-                // Exact Center Switcher: Chat | Server
                 Row(
                     modifier = Modifier
                         .align(Alignment.Center)
@@ -496,7 +491,6 @@ private fun SaMuLabRoot(
                     )
                 }
 
-                // Right Quick Status & Theme Switch
                 Row(
                     modifier = Modifier.align(Alignment.CenterEnd),
                     verticalAlignment = Alignment.CenterVertically,
@@ -517,7 +511,7 @@ private fun SaMuLabRoot(
                             )
                             Text(
                                 text = if (serverRunning) {
-                                    if (telemetry.activeRequests > 0) "Busy · ${String.format("%.1f", telemetry.liveTokensPerSec)} t/s"
+                                    if (telemetry.activeRequests > 0) "Busy · ${String.format(Locale.US, "%.1f", telemetry.liveTokensPerSec)} t/s"
                                     else "Online :${serverSettings.port}"
                                 } else "Offline",
                                 fontSize = 11.sp,
@@ -544,13 +538,13 @@ private fun SaMuLabRoot(
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
-            // Active Tab Content (all state hoisted so neither screen dies on switch!)
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when (activeTab) {
                     MainTab.CHAT -> ChatScreen(
                         allApis = allApis,
                         activeApi = activeApi,
                         localServerRunning = serverRunning,
+                        contextSize = serverSettings.contextSize,
                         chats = chats,
                         activeChat = activeChat,
                         inputText = inputText,
@@ -591,6 +585,10 @@ private fun SaMuLabRoot(
                         onStopStreaming = { chatClient.abort() },
                         onEditMessage = ::editMessage,
                         onRegenerateMessage = ::regenerateFrom,
+                        onSelectTextMessage = { msg -> selectingText = msg.content },
+                        onShareMessage = { msg ->
+                            if (copyToClipboard(msg.content)) showToast("Copied to share!")
+                        },
                         onToggleReadAloud = { msg ->
                             val err = ttsPlayer.toggle(msg.id, msg.content) { activeId ->
                                 scope.launch(Dispatchers.Main) { speakingMsgId = activeId }
@@ -627,7 +625,7 @@ private fun SaMuLabRoot(
                             } else {
                                 val selected = models.find { it.absolutePath == loadedModelPath } ?: models.firstOrNull()
                                 if (selected == null) {
-                                    setServerStatus("Please add a .gguf model first using the + button.", error = true)
+                                    setServerStatus("Please add a .gguf model first using '+ Add Model'.", error = true)
                                 } else {
                                     startServerWithModel(selected)
                                 }
@@ -691,7 +689,7 @@ private fun SaMuLabRoot(
             }
         }
 
-        // --- Modals ---
+        // Modals
         if (showApiModal) {
             ApiEditModal(
                 initial = editingApi,
@@ -716,6 +714,16 @@ private fun SaMuLabRoot(
                     onUpdatePrefs(updated)
                     showChatSettingsModal = false
                     showToast("Settings saved!")
+                }
+            )
+        }
+
+        selectingText?.let { txt ->
+            SelectTextModal(
+                text = txt,
+                onDismiss = { selectingText = null },
+                onCopyAll = {
+                    if (copyToClipboard(txt)) showToast("Copied!")
                 }
             )
         }
@@ -769,7 +777,6 @@ private fun SaMuLabRoot(
             )
         }
 
-        // Bottom Toast
         AnimatedVisibility(
             visible = toastMsg != null,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),

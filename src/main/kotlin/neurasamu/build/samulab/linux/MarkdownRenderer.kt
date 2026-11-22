@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -74,7 +73,6 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
-        // Fenced code block (preserves incomplete blocks during streaming)
         if (trimmed.startsWith("```")) {
             val lang = trimmed.removePrefix("```").trim()
             val codeLines = mutableListOf<String>()
@@ -88,14 +86,12 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
-        // Horizontal rule
         if (trimmed == "---" || trimmed == "***" || trimmed == "___") {
             blocks.add(MdBlock.Divider)
             i++
             continue
         }
 
-        // Headings
         if (trimmed.startsWith("### ")) {
             blocks.add(MdBlock.Heading(3, trimmed.removePrefix("### ").trim()))
             i++
@@ -112,7 +108,6 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
-        // Blockquote
         if (trimmed.startsWith(">")) {
             val quoteLines = mutableListOf<String>()
             while (i < lines.size && lines[i].trim().startsWith(">")) {
@@ -123,7 +118,6 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
-        // Table
         if (trimmed.startsWith("|") && i + 1 < lines.size && isTableSeparator(lines[i + 1].trim())) {
             val headers = splitTableRow(trimmed)
             i += 2
@@ -136,14 +130,12 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
-        // Unordered list
         if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
             blocks.add(MdBlock.ListItem("•", trimmed.substring(2).trim()))
             i++
             continue
         }
 
-        // Ordered list
         val orderedMatch = Regex("""^(\d+\.)\s+(.*)$""").find(trimmed)
         if (orderedMatch != null) {
             blocks.add(MdBlock.ListItem(orderedMatch.groupValues[1], orderedMatch.groupValues[2]))
@@ -151,7 +143,6 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
             continue
         }
 
-        // Normal paragraph
         val paraLines = mutableListOf(line)
         i++
         while (i < lines.size) {
@@ -193,13 +184,22 @@ private fun buildInlineAnnotated(
     palette: SaMuPalette,
     scale: Float
 ): AnnotatedString = buildAnnotatedString {
+    val plainBuf = StringBuilder()
+
+    fun flushPlain() {
+        if (plainBuf.isNotEmpty()) {
+            with(EmojiSupport) { appendWithEmojis(plainBuf.toString()) }
+            plainBuf.setLength(0)
+        }
+    }
+
     var i = 0
     val n = text.length
     while (i < n) {
-        // Inline code: `code`
         if (text[i] == '`') {
             val end = text.indexOf('`', i + 1)
             if (end > i + 1) {
+                flushPlain()
                 pushStyle(
                     SpanStyle(
                         fontFamily = FontFamily.Monospace,
@@ -217,12 +217,12 @@ private fun buildInlineAnnotated(
             }
         }
 
-        // Link: [label](url)
         if (text[i] == '[') {
             val closeBracket = text.indexOf(']', i + 1)
             if (closeBracket > i && closeBracket + 1 < n && text[closeBracket + 1] == '(') {
                 val closeParen = text.indexOf(')', closeBracket + 2)
                 if (closeParen > closeBracket + 2) {
+                    flushPlain()
                     val label = text.substring(i + 1, closeBracket)
                     val url = text.substring(closeBracket + 2, closeParen)
                     pushStringAnnotation(tag = "URL", annotation = url)
@@ -232,7 +232,7 @@ private fun buildInlineAnnotated(
                             textDecoration = TextDecoration.Underline
                         )
                     )
-                    append(label)
+                    with(EmojiSupport) { appendWithEmojis(label) }
                     pop()
                     pop()
                     i = closeParen + 1
@@ -241,10 +241,10 @@ private fun buildInlineAnnotated(
             }
         }
 
-        // Bold: **text**
         if (i + 1 < n && text[i] == '*' && text[i + 1] == '*') {
             val end = text.indexOf("**", i + 2)
             if (end > i + 2) {
+                flushPlain()
                 pushStyle(SpanStyle(fontWeight = FontWeight.SemiBold))
                 append(buildInlineAnnotated(text.substring(i + 2, end), palette, scale))
                 pop()
@@ -253,10 +253,10 @@ private fun buildInlineAnnotated(
             }
         }
 
-        // Underline: __text__
         if (i + 1 < n && text[i] == '_' && text[i + 1] == '_') {
             val end = text.indexOf("__", i + 2)
             if (end > i + 2) {
+                flushPlain()
                 pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
                 append(buildInlineAnnotated(text.substring(i + 2, end), palette, scale))
                 pop()
@@ -265,10 +265,10 @@ private fun buildInlineAnnotated(
             }
         }
 
-        // Italic: *text*
         if (text[i] == '*') {
             val end = text.indexOf('*', i + 1)
             if (end > i + 1) {
+                flushPlain()
                 pushStyle(SpanStyle(fontStyle = FontStyle.Italic))
                 append(buildInlineAnnotated(text.substring(i + 1, end), palette, scale))
                 pop()
@@ -277,9 +277,10 @@ private fun buildInlineAnnotated(
             }
         }
 
-        append(text[i])
+        plainBuf.append(text[i])
         i++
     }
+    flushPlain()
 }
 
 @Composable
@@ -529,7 +530,7 @@ private fun MarkdownTable(
         Row(modifier = Modifier.background(palette.surfaceVariant)) {
             headers.forEach { cell ->
                 Text(
-                    text = cell,
+                    text = EmojiSupport.format(cell),
                     fontSize = (12f * scale).sp,
                     fontWeight = FontWeight.SemiBold,
                     color = palette.onSurface,
@@ -545,7 +546,7 @@ private fun MarkdownTable(
                 val cols = maxOf(headers.size, row.size)
                 for (c in 0 until cols) {
                     Text(
-                        text = row.getOrElse(c) { "" },
+                        text = EmojiSupport.format(row.getOrElse(c) { "" }),
                         fontSize = (12f * scale).sp,
                         color = palette.onSurface,
                         modifier = Modifier

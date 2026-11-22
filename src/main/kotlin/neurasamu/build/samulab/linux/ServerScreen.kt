@@ -6,33 +6,37 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -85,16 +89,19 @@ fun ServerScreen(
     val displayHost = if (settings.lanAccess) localIp else "127.0.0.1"
     val apiBaseUrl = "http://$displayHost:${settings.port}/v1"
 
-    Row(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(palette.background)
-            .padding(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        // Left Column: Server Controls + Models
-        Box(modifier = Modifier.weight(1.25f).fillMaxHeight()) {
-            Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(palette.background)
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Left Column: Server Controls + Models
+            Column(
+                modifier = Modifier.weight(1.25f).fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = palette.surface),
@@ -142,7 +149,7 @@ fun ServerScreen(
                                 focusedContainerColor = palette.background,
                                 unfocusedContainerColor = palette.background,
                                 focusedBorderColor = palette.primary,
-                                unfocusedBorderColor = palette.surfaceVariant,
+                                unfocusedBorderColor = palette.divider,
                                 focusedTextColor = palette.onSurface,
                                 unfocusedTextColor = palette.onSurface
                             ),
@@ -221,13 +228,32 @@ fun ServerScreen(
                     }
                 }
 
-                Text(
-                    "Models",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.onSurface,
-                    modifier = Modifier.padding(horizontal = 4.dp)
-                )
+                // Models Header with clean non-overlapping "+ Add Model" button
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Models (${models.size})",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.onSurface
+                    )
+                    Button(
+                        onClick = {
+                            openFilePicker("Select GGUF Model", setOf(".gguf"))?.let(onAddModelFile)
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = "Add Model", tint = Color.White, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Add Model", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                    }
+                }
 
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (models.isEmpty()) {
@@ -240,7 +266,7 @@ fun ServerScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                "No models yet. Click + to pick a .gguf file from storage.",
+                                "No models yet. Click '+ Add Model' to pick a .gguf file from storage.",
                                 color = palette.textSecondary,
                                 fontSize = 13.sp
                             )
@@ -248,7 +274,8 @@ fun ServerScreen(
                     } else {
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            contentPadding = PaddingValues(bottom = 8.dp)
                         ) {
                             items(models, key = { it.absolutePath }) { file ->
                                 ServerModelRow(
@@ -261,125 +288,114 @@ fun ServerScreen(
                             }
                         }
                     }
-
-                    FloatingActionButton(
-                        onClick = {
-                            openFilePicker("Select GGUF Model", setOf(".gguf"))?.let(onAddModelFile)
-                        },
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
-                        containerColor = palette.primary,
-                        contentColor = Color.White
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = "Add Model")
-                    }
                 }
             }
-        }
 
-        // Right Column: Real-Time Processing & Live Activity Feed
-        Card(
-            modifier = Modifier.weight(0.9f).fillMaxHeight(),
-            colors = CardDefaults.cardColors(containerColor = palette.surface),
-            shape = RoundedCornerShape(14.dp),
-            border = BorderStroke(1.dp, palette.divider)
-        ) {
-            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Real-Time Monitor",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.onSurface
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(
-                                if (telemetry.activeRequests > 0) palette.primary.copy(alpha = 0.2f)
-                                else palette.surfaceVariant
-                            )
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
+            // Right Column: Real-Time Monitor
+            Card(
+                modifier = Modifier.weight(0.9f).fillMaxHeight(),
+                colors = CardDefaults.cardColors(containerColor = palette.surface),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, palette.divider)
+            ) {
+                Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = if (serverRunning) telemetry.currentStatus else "Offline",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = if (telemetry.activeRequests > 0) palette.primary else palette.textSecondary
+                            "Real-Time Monitor",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.onSurface
                         )
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatTile("Active", telemetry.activeRequests.toString(), Modifier.weight(1f))
-                    StatTile("Requests", telemetry.totalRequests.toString(), Modifier.weight(1f))
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatTile("Live Speed", String.format(Locale.US, "%.1f t/s", telemetry.liveTokensPerSec), Modifier.weight(1f))
-                    StatTile("Tokens", telemetry.totalTokens.toString(), Modifier.weight(1f))
-                }
-
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    "LIVE ACTIVITY",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.5.sp,
-                    color = palette.textSecondary
-                )
-                Spacer(Modifier.height(8.dp))
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(palette.background)
-                        .border(1.dp, palette.divider, RoundedCornerShape(10.dp))
-                        .padding(10.dp)
-                ) {
-                    if (telemetry.logs.isEmpty()) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Spacer(Modifier.weight(1f))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(
+                                    if (telemetry.activeRequests > 0) palette.primary.copy(alpha = 0.2f)
+                                    else palette.surfaceVariant
+                                )
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
                             Text(
-                                "Waiting for server activity...",
-                                fontSize = 12.sp,
-                                color = palette.textTertiary
+                                text = if (serverRunning) telemetry.currentStatus else "Offline",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (telemetry.activeRequests > 0) palette.primary else palette.textSecondary
                             )
                         }
-                    } else {
-                        LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(telemetry.logs, key = { it.id }) { entry ->
-                                val badgeColor = when (entry.level) {
-                                    "ACTIVE" -> palette.primary
-                                    "OK" -> palette.success
-                                    "ERR" -> palette.error
-                                    else -> palette.textSecondary
-                                }
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text(
-                                        entry.time,
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = palette.textTertiary
-                                    )
-                                    Text(
-                                        entry.level,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = badgeColor
-                                    )
-                                    Text(
-                                        entry.message,
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = palette.onSurface,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StatTile("Active", telemetry.activeRequests.toString(), Modifier.weight(1f))
+                        StatTile("Requests", telemetry.totalRequests.toString(), Modifier.weight(1f))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StatTile("Live Speed", String.format(Locale.US, "%.1f t/s", telemetry.liveTokensPerSec), Modifier.weight(1f))
+                        StatTile("Tokens", telemetry.totalTokens.toString(), Modifier.weight(1f))
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "LIVE ACTIVITY",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.5.sp,
+                        color = palette.textSecondary
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(palette.background)
+                            .border(1.dp, palette.divider, RoundedCornerShape(10.dp))
+                            .padding(10.dp)
+                    ) {
+                        if (telemetry.logs.isEmpty()) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    "Waiting for server activity...",
+                                    fontSize = 12.sp,
+                                    color = palette.textTertiary
+                                )
+                            }
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(telemetry.logs, key = { it.id }) { entry ->
+                                    val badgeColor = when (entry.level) {
+                                        "ACTIVE" -> palette.primary
+                                        "OK" -> palette.success
+                                        "ERR" -> palette.error
+                                        else -> palette.textSecondary
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(
+                                            entry.time,
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = palette.textTertiary
+                                        )
+                                        Text(
+                                            entry.level,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = badgeColor
+                                        )
+                                        Text(
+                                            entry.message,
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = palette.onSurface,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -387,17 +403,17 @@ fun ServerScreen(
                 }
             }
         }
-    }
 
-    if (showServerSettings) {
-        ServerSettingsDialog(
-            settings = settings,
-            onDismiss = { showServerSettings = false },
-            onSave = { updated ->
-                showServerSettings = false
-                onSaveServerSettings(updated)
-            }
-        )
+        if (showServerSettings) {
+            ServerSettingsModal(
+                settings = settings,
+                onDismiss = { showServerSettings = false },
+                onSave = { updated ->
+                    showServerSettings = false
+                    onSaveServerSettings(updated)
+                }
+            )
+        }
     }
 }
 
@@ -479,68 +495,158 @@ private fun ServerModelRow(
 }
 
 @Composable
-private fun ServerSettingsDialog(
+private fun ServerSettingsModal(
     settings: AppSettings,
     onDismiss: () -> Unit,
     onSave: (AppSettings) -> Unit
 ) {
-    var port by remember { mutableStateOf(settings.port.toString()) }
-    var lan by remember { mutableStateOf(settings.lanAccess) }
-    var threads by remember { mutableStateOf(settings.threadsOverride.toString()) }
-    var ctx by remember { mutableStateOf(settings.contextSize.toString()) }
-    var auth by remember { mutableStateOf(settings.requireAuth) }
+    val palette = LocalSaMuColors.current
+    var port by remember(settings) { mutableStateOf(settings.port.toString()) }
+    var lan by remember(settings) { mutableStateOf(settings.lanAccess) }
+    var threads by remember(settings) { mutableStateOf(settings.threadsOverride.toString()) }
+    var ctx by remember(settings) { mutableStateOf(settings.contextSize.toString()) }
+    var auth by remember(settings) { mutableStateOf(settings.requireAuth) }
+    var customKey by remember(settings) { mutableStateOf(settings.apiKey) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Server Settings") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { port = it.filter(Char::isDigit) },
-                    label = { Text("Port (1024-65535)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("LAN Access", modifier = Modifier.weight(1f))
-                    Switch(checked = lan, onCheckedChange = { lan = it })
-                }
-                OutlinedTextField(
-                    value = threads,
-                    onValueChange = { threads = it.filter(Char::isDigit) },
-                    label = { Text("Threads (0 = Auto)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = ctx,
-                    onValueChange = { ctx = it.filter(Char::isDigit) },
-                    label = { Text("Context Size (512-131072)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Require API Key", modifier = Modifier.weight(1f))
-                    Switch(checked = auth, onCheckedChange = { auth = it })
+    ModalOverlay(onDismiss = onDismiss) {
+        Column(
+            modifier = Modifier
+                .widthIn(min = 360.dp, max = 480.dp)
+                .fillMaxWidth(0.92f)
+                .heightIn(max = 680.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.divider, RoundedCornerShape(14.dp))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Server Settings", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = palette.onSurface)
+                IconButton(onClick = onDismiss, modifier = Modifier.size(30.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = "Close", tint = palette.textTertiary)
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                onSave(
-                    settings.copy(
-                        port = port.toIntOrNull() ?: 8080,
-                        lanAccess = lan,
-                        threadsOverride = threads.toIntOrNull() ?: 0,
-                        contextSize = ctx.toIntOrNull() ?: 4096,
-                        requireAuth = auth
-                    ).validated()
+            Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+            Column(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                ModalField(
+                    label = "PORT (1024–65535)",
+                    value = port,
+                    onChange = { port = it.filter(Char::isDigit); errorMsg = null },
+                    placeholder = "8080"
                 )
-            }) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("LAN Access", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.onSurface)
+                        Text("Allow phones & other devices on same Wi-Fi", fontSize = 11.sp, color = palette.textTertiary)
+                    }
+                    Switch(checked = lan, onCheckedChange = { lan = it })
+                }
+
+                ModalField(
+                    label = "CPU THREADS (0 = AUTO)",
+                    value = threads,
+                    onChange = { threads = it.filter(Char::isDigit) },
+                    placeholder = "0"
+                )
+
+                ModalField(
+                    label = "CONTEXT SIZE (512–131072)",
+                    value = ctx,
+                    onChange = { ctx = it.filter(Char::isDigit) },
+                    placeholder = "4096"
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Require API Key", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.onSurface)
+                        Text("Protect your server with a Bearer key", fontSize = 11.sp, color = palette.textTertiary)
+                    }
+                    Switch(checked = auth, onCheckedChange = { auth = it })
+                }
+
+                ModalField(
+                    label = "CUSTOM API KEY (MIN 8 CHARS)",
+                    value = customKey,
+                    onChange = { customKey = it; errorMsg = null },
+                    placeholder = "Enter at least 8 characters...",
+                    trailingIcon = {
+                        IconButton(onClick = { customKey = AppSettings.generateKey(); errorMsg = null }) {
+                            Icon(
+                                Icons.Filled.Refresh,
+                                contentDescription = "Generate Random API Key",
+                                tint = palette.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                )
+
+                errorMsg?.let {
+                    Text(it, color = palette.error, fontSize = 12.sp)
+                }
+            }
+
+            Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, palette.primary)
+                ) {
+                    Text("Cancel", color = palette.primary, fontSize = 13.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        val trimmedKey = customKey.trim()
+                        if (trimmedKey.length < 8) {
+                            errorMsg = "API Key must be at least 8 characters."
+                            return@Button
+                        }
+                        onSave(
+                            settings.copy(
+                                port = port.toIntOrNull() ?: 8080,
+                                lanAccess = lan,
+                                threadsOverride = threads.toIntOrNull() ?: 0,
+                                contextSize = ctx.toIntOrNull() ?: 4096,
+                                requireAuth = auth,
+                                apiKey = trimmedKey
+                            ).validated()
+                        )
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary)
+                ) {
+                    Text("Save", color = palette.onPrimary, fontSize = 13.sp)
+                }
+            }
         }
-    )
+    }
 }

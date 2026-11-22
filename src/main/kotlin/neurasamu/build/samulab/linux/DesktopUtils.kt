@@ -79,10 +79,8 @@ fun createLinuxDesktopShortcut(): Pair<Boolean, String> {
         // Save icon in ~/.local/share/samu-lab/icon.png so shortcut always has the exact icon
         SettingsStore.ensureDirs()
         val iconDest = SettingsStore.appDir.resolve("icon.png").toFile()
-        if (!iconDest.exists()) {
-            Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")?.use { input ->
-                iconDest.outputStream().use { output -> input.copyTo(output) }
-            }
+        Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")?.use { input ->
+            iconDest.outputStream().use { output -> input.copyTo(output) }
         }
 
         val execCandidates = listOf(

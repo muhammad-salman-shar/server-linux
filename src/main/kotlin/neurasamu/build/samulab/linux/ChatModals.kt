@@ -1,7 +1,7 @@
 package neurasamu.build.samulab.linux
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -65,7 +66,7 @@ fun loadImageBitmapSafe(path: String): ImageBitmap? = runCatching {
 }.getOrNull()
 
 @Composable
-private fun ModalOverlay(
+internal fun ModalOverlay(
     onDismiss: () -> Unit,
     overlayAlpha: Float = 0.70f,
     content: @Composable () -> Unit
@@ -94,6 +95,47 @@ private fun ModalOverlay(
 }
 
 @Composable
+internal fun ModalField(
+    label: String,
+    value: String,
+    onChange: (String) -> Unit,
+    placeholder: String,
+    singleLine: Boolean = true,
+    trailingIcon: (@Composable () -> Unit)? = null
+) {
+    val palette = LocalSaMuColors.current
+    Column {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.3.sp,
+            color = palette.textSecondary,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        OutlinedTextField(
+            value = value,
+            onValueChange = onChange,
+            placeholder = { Text(placeholder, color = palette.textTertiary, fontSize = 13.sp) },
+            singleLine = singleLine,
+            minLines = if (singleLine) 1 else 2,
+            maxLines = if (singleLine) 1 else 4,
+            trailingIcon = trailingIcon,
+            shape = RoundedCornerShape(8.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedContainerColor = palette.background,
+                unfocusedContainerColor = palette.background,
+                focusedBorderColor = palette.primary,
+                unfocusedBorderColor = palette.divider,
+                focusedTextColor = palette.onSurface,
+                unfocusedTextColor = palette.onSurface
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
 fun ApiEditModal(
     initial: ApiConfig?,
     onDismiss: () -> Unit,
@@ -110,14 +152,13 @@ fun ApiEditModal(
     ModalOverlay(onDismiss = onDismiss) {
         Column(
             modifier = Modifier
-                .widthIn(min = 320.dp, max = 440.dp)
+                .widthIn(min = 340.dp, max = 460.dp)
                 .fillMaxWidth(0.92f)
-                .heightIn(max = 650.dp)
+                .heightIn(max = 680.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(palette.surface)
                 .border(1.dp, palette.divider, RoundedCornerShape(14.dp))
         ) {
-            // Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -137,16 +178,15 @@ fun ApiEditModal(
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
-            // Body
             Column(
                 modifier = Modifier
                     .weight(1f, fill = false)
                     .verticalScroll(rememberScrollState())
                     .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 ModalField("LABEL", label, { label = it; errorMsg = null }, "e.g. My SaMu Lab")
-                ModalField("BASE URL", baseUrl, { baseUrl = it; errorMsg = null }, "[http://192.168.1.5:8080/v1](http://192.168.1.5:8080/v1)")
+                ModalField("BASE URL", baseUrl, { baseUrl = it; errorMsg = null }, "http://192.168.1.5:8080/v1")
                 ModalField("MODEL NAME", modelName, { modelName = it; errorMsg = null }, "samu")
                 ModalField("API KEY (OPTIONAL)", apiKey, { apiKey = it }, "Leave empty if auth is off")
                 ModalField(
@@ -163,7 +203,6 @@ fun ApiEditModal(
 
             Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
-            // Footer
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -181,13 +220,18 @@ fun ApiEditModal(
                 Spacer(Modifier.width(8.dp))
                 Button(
                     onClick = {
-                        if (label.isBlank() || baseUrl.isBlank() || modelName.isBlank()) {
+                        val cleanedUrl = sanitizeApiUrl(baseUrl)
+                        if (label.isBlank() || cleanedUrl.isBlank() || modelName.isBlank()) {
                             errorMsg = "Label, Base URL, and Model Name are required."
+                            return@Button
+                        }
+                        if (!cleanedUrl.startsWith("http://") && !cleanedUrl.startsWith("https://")) {
+                            errorMsg = "Base URL must start with http:// or https://"
                             return@Button
                         }
                         val updated = (initial ?: ApiConfig(label = "", baseUrl = "", modelName = "")).copy(
                             label = label.trim(),
-                            baseUrl = baseUrl.trim(),
+                            baseUrl = cleanedUrl,
                             modelName = modelName.trim(),
                             apiKey = apiKey.trim(),
                             systemPrompt = systemPrompt.trim(),
@@ -206,41 +250,98 @@ fun ApiEditModal(
 }
 
 @Composable
-private fun ModalField(
-    label: String,
-    value: String,
-    onChange: (String) -> Unit,
-    placeholder: String,
-    singleLine: Boolean = true
+fun SelectTextModal(
+    text: String,
+    onDismiss: () -> Unit,
+    onCopyAll: () -> Unit
 ) {
     val palette = LocalSaMuColors.current
-    Column {
-        Text(
-            text = label,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 0.3.sp,
-            color = palette.textSecondary,
-            modifier = Modifier.padding(bottom = 6.dp)
-        )
-        OutlinedTextField(
-            value = value,
-            onValueChange = onChange,
-            placeholder = { Text(placeholder, color = palette.textTertiary, fontSize = 13.sp) },
-            singleLine = singleLine,
-            minLines = if (singleLine) 1 else 2,
-            maxLines = if (singleLine) 1 else 4,
-            shape = RoundedCornerShape(8.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = palette.background,
-                unfocusedContainerColor = palette.background,
-                focusedBorderColor = palette.primary,
-                unfocusedBorderColor = palette.surfaceVariant,
-                focusedTextColor = palette.onSurface,
-                unfocusedTextColor = palette.onSurface
-            ),
-            modifier = Modifier.fillMaxWidth()
-        )
+
+    ModalOverlay(onDismiss = onDismiss) {
+        Column(
+            modifier = Modifier
+                .widthIn(min = 360.dp, max = 620.dp)
+                .fillMaxWidth(0.9f)
+                .heightIn(max = 560.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.divider, RoundedCornerShape(14.dp))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Select Text", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = palette.onSurface)
+                IconButton(onClick = onDismiss, modifier = Modifier.size(30.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = "Close", tint = palette.textTertiary)
+                }
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+            Column(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .padding(18.dp)
+            ) {
+                Text(
+                    "Highlight any part of the text below and press Ctrl+C to copy.",
+                    fontSize = 12.sp,
+                    color = palette.textSecondary,
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = {},
+                    readOnly = true,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = palette.background,
+                        unfocusedContainerColor = palette.background,
+                        focusedBorderColor = palette.primary,
+                        unfocusedBorderColor = palette.divider,
+                        focusedTextColor = palette.onSurface,
+                        unfocusedTextColor = palette.onSurface
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 160.dp, max = 380.dp)
+                )
+            }
+
+            Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, palette.divider)
+                ) {
+                    Text("Close", color = palette.onSurface, fontSize = 13.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        onCopyAll()
+                        onDismiss()
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary)
+                ) {
+                    Icon(Icons.Filled.ContentCopy, contentDescription = null, tint = palette.onPrimary, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Copy All", color = palette.onPrimary, fontSize = 13.sp)
+                }
+            }
+        }
     }
 }
 
@@ -287,7 +388,6 @@ fun ChatSettingsModal(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
-                // Theme
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         "THEME",
@@ -316,7 +416,6 @@ fun ChatSettingsModal(
                     }
                 }
 
-                // Font Size
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
                         "FONT SIZE",
@@ -344,7 +443,6 @@ fun ChatSettingsModal(
                     )
                 }
 
-                // Custom Instructions
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -377,7 +475,7 @@ fun ChatSettingsModal(
                             focusedContainerColor = palette.background,
                             unfocusedContainerColor = palette.background,
                             focusedBorderColor = palette.primary,
-                            unfocusedBorderColor = palette.surfaceVariant,
+                            unfocusedBorderColor = palette.divider,
                             focusedTextColor = palette.onSurface,
                             unfocusedTextColor = palette.onSurface
                         ),
@@ -514,14 +612,18 @@ fun RenameChatModal(
                     focusedContainerColor = palette.background,
                     unfocusedContainerColor = palette.background,
                     focusedBorderColor = palette.primary,
-                    unfocusedBorderColor = palette.surfaceVariant,
+                    unfocusedBorderColor = palette.divider,
                     focusedTextColor = palette.onSurface,
                     unfocusedTextColor = palette.onSurface
                 ),
                 modifier = Modifier.fillMaxWidth()
             )
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                OutlinedButton(onClick = onDismiss, shape = RoundedCornerShape(8.dp)) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, palette.primary)
+                ) {
                     Text("Cancel", color = palette.primary)
                 }
                 Spacer(Modifier.width(8.dp))
@@ -560,7 +662,11 @@ fun ConfirmDeleteModal(
             Text(message, fontSize = 13.sp, color = palette.textSecondary)
             Spacer(Modifier.height(4.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                OutlinedButton(onClick = onDismiss, shape = RoundedCornerShape(8.dp)) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, palette.divider)
+                ) {
                     Text("Cancel", color = palette.onSurface)
                 }
                 Spacer(Modifier.width(8.dp))

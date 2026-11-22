@@ -21,7 +21,7 @@ data class AppSettings(
         port = port.coerceIn(1024, 65535),
         threadsOverride = threadsOverride.coerceIn(0, 256),
         contextSize = contextSize.coerceIn(512, 131072),
-        apiKey = apiKey.trim().ifEmpty { generateKey() },
+        apiKey = apiKey.trim().let { if (it.length >= 8) it else generateKey() },
         modelApiName = modelApiName.trim().ifEmpty { "samu-local" },
         modelPaths = modelPaths.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
     )
@@ -62,7 +62,7 @@ data class AppSettings(
                 threadsOverride = o.optInt("threadsOverride", 0),
                 contextSize = o.optInt("contextSize", 4096),
                 requireAuth = o.optBoolean("requireAuth", false),
-                apiKey = o.optString("apiKey", "").ifBlank { generateKey() },
+                apiKey = o.optString("apiKey", "").trim().let { if (it.length >= 8) it else generateKey() },
                 modelApiName = o.optString("modelApiName", "samu-local"),
                 modelPaths = paths
             ).validated()

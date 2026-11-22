@@ -38,7 +38,7 @@ class ChatClient {
         onComplete: (fullText: String, wasStopped: Boolean, error: String?) -> Unit
     ) {
         cancelledByUser = false
-        val base = api.baseUrl.trim().trimEnd('/')
+        val base = sanitizeApiUrl(api.baseUrl).trimEnd('/')
         if (base.isBlank()) {
             onComplete("", false, "API Base URL is empty.")
             return
@@ -134,6 +134,8 @@ class ChatClient {
             .url(endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
+            .header("Accept-Encoding", "identity")
+            .header("Cache-Control", "no-cache")
             .post(payload.toRequestBody("application/json".toMediaType()))
 
         if (api.apiKey.isNotBlank()) {
@@ -168,7 +170,6 @@ class ChatClient {
 
                 val contentType = body.contentType()?.toString().orEmpty().lowercase()
                 if (contentType.contains("application/json")) {
-                    // Fallback for non-streaming server response
                     val text = body.string()
                     val parsed = runCatching {
                         val j = JSONObject(text)
@@ -186,7 +187,7 @@ class ChatClient {
                     return
                 }
 
-                BufferedReader(InputStreamReader(body.byteStream(), StandardCharsets.UTF_8)).use { reader ->
+                BufferedReader(InputStreamReader(body.byteStream(), StandardCharsets.UTF_8), 256).use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         if (cancelledByUser) break
@@ -210,7 +211,7 @@ class ChatClient {
                         if (chunk.isNotEmpty()) {
                             buffer.append(chunk)
                             val now = System.currentTimeMillis()
-                            if (now - lastEmit >= 80L) {
+                            if (lastEmit == 0L || now - lastEmit >= 25L) {
                                 onDelta(buffer.toString())
                                 lastEmit = now
                             }

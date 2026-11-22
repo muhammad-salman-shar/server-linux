@@ -100,6 +100,18 @@ jobs:
           PYEOF
           ls -lh resources/linux-x64/llama-engine.tar.gz
 
+      - name: Bundle Noto Color Emoji font
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-color-emoji || true
+          mkdir -p src/main/resources/fonts
+          EMOJI_TTF=$(find /usr/share/fonts -iname "NotoColorEmoji.ttf" 2>/dev/null | head -n 1)
+          if [ -n "$EMOJI_TTF" ] && [ -f "$EMOJI_TTF" ]; then
+            cp "$EMOJI_TTF" src/main/resources/fonts/emoji.ttf
+            ls -lh src/main/resources/fonts/emoji.ttf
+          else
+            echo "Warning: NotoColorEmoji.ttf not found, continuing with system fallback"
+          fi
+
       - name: Build .deb
         run: gradle packageDeb --no-daemon --stacktrace
 
