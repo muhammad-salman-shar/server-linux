@@ -8,6 +8,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.nio.file.Files
@@ -263,7 +264,7 @@ class EngineManager {
                 SettingsStore.ensureDirs()
                 val arch = System.getProperty("os.arch").orEmpty().lowercase()
                 val isArm = arch.contains("aarch64") || arch.contains("arm64")
-                val targetSuffix = if (isArm) "bin-ubuntu-arm64.tar.gz" else "bin-ubuntu-x64.tar.gz"
+                val targetSuffix = if (isArm) "-bin-ubuntu-arm64.tar.gz" else "-bin-ubuntu-x64.tar.gz"
 
                 val client = OkHttpClient.Builder()
                     .connectTimeout(30, TimeUnit.SECONDS)
@@ -273,26 +274,31 @@ class EngineManager {
 
                 onProgress("Finding latest engine...")
                 val apiReq = Request.Builder()
-                    .url("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
+                    .url("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10")
                     .header("User-Agent", "SaMu-Lab-Linux")
                     .header("Accept", "application/vnd.github+json")
                     .build()
 
                 val downloadUrl = client.newCall(apiReq).execute().use { resp ->
                     if (!resp.isSuccessful) throw Exception("GitHub API error: HTTP ${resp.code}")
-                    val json = JSONObject(resp.body?.string() ?: throw Exception("Empty GitHub release response"))
-                    val assets = json.optJSONArray("assets") ?: throw Exception("No assets in latest release")
+                    val releases = JSONArray(resp.body?.string() ?: throw Exception("Empty GitHub releases response"))
                     var found: String? = null
-                    for (i in 0 until assets.length()) {
-                        val asset = assets.getJSONObject(i)
-                        val name = asset.optString("name", "")
-                        if (name.endsWith(targetSuffix)) {
-                            found = asset.optString("browser_download_url", "")
-                            break
+                    for (r in 0 until releases.length()) {
+                        val rel = releases.getJSONObject(r)
+                        if (rel.optBoolean("draft", false)) continue
+                        val assets = rel.optJSONArray("assets") ?: continue
+                        for (i in 0 until assets.length()) {
+                            val asset = assets.getJSONObject(i)
+                            val name = asset.optString("name", "")
+                            if (name.startsWith("llama-") && name.endsWith(targetSuffix)) {
+                                found = asset.optString("browser_download_url", "")
+                                break
+                            }
                         }
+                        if (!found.isNullOrBlank()) break
                     }
                     found?.takeIf { it.isNotBlank() }
-                        ?: throw Exception("No Linux binary matching *$targetSuffix found")
+                        ?: throw Exception("No Linux binary matching llama-*$targetSuffix found")
                 }
 
                 onProgress("Downloading engine ($arch)...")
