@@ -166,7 +166,8 @@ class ApiServer(
         val profile = imgModel?.let { settings.profileFor(it) }
 
         val startNanos = monitor?.onRequestStart("/v1/images/generations", session.remoteIpAddress ?: "local", false) ?: System.nanoTime()
-        val res = mediaEngines.generateImage(prompt, imgModel, profile, settings, w, h, steps) { msg ->
+        val refFile = decodeRefImage(j.optString("init_image_b64", ""))
+        val res = mediaEngines.generateImage(prompt, imgModel, profile, settings, w, h, steps, refFile) { msg ->
             monitor?.log("ACTIVE", msg)
         }
         return res.fold(
@@ -247,7 +248,8 @@ class ApiServer(
         val profile = vidModel?.let { settings.profileFor(it) }
 
         val startNanos = monitor?.onRequestStart("/v1/videos/generations", session.remoteIpAddress ?: "local", false) ?: System.nanoTime()
-        val res = mediaEngines.generateVideo(prompt, vidModel, profile, settings, frames) { msg ->
+        val refFile = decodeRefImage(j.optString("init_image_b64", ""))
+        val res = mediaEngines.generateVideo(prompt, vidModel, profile, settings, frames, refFile) { msg ->
             monitor?.log("ACTIVE", msg)
         }
         return res.fold(
@@ -368,6 +370,17 @@ class ApiServer(
         r.addHeader("X-Accel-Buffering", "no")
         r.addHeader("Connection", "keep-alive")
         return r
+    }
+
+    private fun decodeRefImage(b64: String): File? {
+        if (b64.isBlank()) return null
+        return runCatching {
+            val clean = b64.substringAfter("base64,", b64).trim()
+            val bytes = Base64.getDecoder().decode(clean)
+            val f = File(SettingsStore.mediaDir().resolve("images").toFile().apply { mkdirs() }, "ref_${System.currentTimeMillis()}.png")
+            f.writeBytes(bytes)
+            f
+        }.getOrNull()
     }
 
     private fun checkAuth(session: IHTTPSession): Boolean {

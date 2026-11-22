@@ -9,11 +9,11 @@ import java.util.UUID
 
 const val LOCAL_SAMU_API_ID = "__samu_local_builtin__"
 
-enum class ThinkingEffort(val label: String, val apiValue: String) {
-    OFF("Off", "none"),
-    LOW("Low", "low"),
-    HIGH("High", "medium"),
-    MAX("Max", "high");
+enum class ThinkingEffort(val label: String, val apiValue: String, val budgetTokens: Int) {
+    OFF("Off", "none", 0),
+    LOW("Low", "low", 512),
+    HIGH("High", "medium", 4096),
+    MAX("Max", "high", -1);
 
     companion object {
         fun fromName(name: String?): ThinkingEffort =

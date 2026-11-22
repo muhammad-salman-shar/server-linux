@@ -27,6 +27,7 @@ class MediaEngines {
         width: Int = 512,
         height: Int = 512,
         steps: Int = 20,
+        referenceImage: File? = null,
         onProgress: (String) -> Unit = {}
     ): Result<File> {
         if (prompt.isBlank()) return Result.failure(Exception("Image prompt is empty."))
@@ -51,6 +52,12 @@ class MediaEngines {
             cmd.add(targetModel.absolutePath)
         }
 
+        if (referenceImage != null && referenceImage.isFile) {
+            cmd.add("--init-img")
+            cmd.add(referenceImage.absolutePath)
+            cmd.add("--strength")
+            cmd.add("0.75")
+        }
         profile?.extraByRole("vae")?.let { cmd.add("--vae"); cmd.add(it) }
         profile?.extraByRole("clip")?.let { cmd.add("--clip_l"); cmd.add(it) }
         profile?.extraByRole("t5")?.let { cmd.add("--t5xxl"); cmd.add(it) }
@@ -135,6 +142,7 @@ class MediaEngines {
         profile: ModelProfile?,
         settings: AppSettings,
         frames: Int = 17,
+        referenceImage: File? = null,
         onProgress: (String) -> Unit = {}
     ): Result<File> {
         if (prompt.isBlank()) return Result.failure(Exception("Video prompt is empty."))
@@ -163,6 +171,10 @@ class MediaEngines {
         )
 
         profile?.extraByRole("vae")?.let { cmd.add("--vae"); cmd.add(it) }
+        if (referenceImage != null && referenceImage.isFile) {
+            cmd.add("--init-img")
+            cmd.add(referenceImage.absolutePath)
+        }
         profile?.extraByRole("t5")?.let { cmd.add("--t5xxl"); cmd.add(it) }
         profile?.extraByRole("clip")?.let { cmd.add("--clip_l"); cmd.add(it) }
         if (!profile?.customArgs.isNullOrBlank()) {

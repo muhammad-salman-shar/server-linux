@@ -85,12 +85,12 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -125,8 +125,7 @@ fun ChatScreen(
     thinkingEffort: ThinkingEffort,
     chatMode: ChatMode,
     onChatModeChange: (ChatMode) -> Unit,
-    onToggleThinking: () -> Unit,
-    onThinkingEffortChange: (ThinkingEffort) -> Unit,
+    onSelectThinkingEffort: (ThinkingEffort) -> Unit,
     chats: List<ChatSession>,
     activeChat: ChatSession,
     inputText: String,
@@ -152,6 +151,7 @@ fun ChatScreen(
     onRequestRenameChat: (ChatSession) -> Unit,
     onDownloadChat: (ChatSession) -> Unit,
     onRequestDeleteChat: (ChatSession) -> Unit,
+    onRequestDeleteAllChats: () -> Unit,
     onOpenChatSettings: () -> Unit,
     onSendMessage: () -> Unit,
     onStopStreaming: () -> Unit,
@@ -194,13 +194,14 @@ fun ChatScreen(
                         onSelectChat = onSelectChat,
                         onRenameChat = onRequestRenameChat,
                         onDownloadChat = onDownloadChat,
-                        onDeleteChat = onRequestDeleteChat
+                        onDeleteChat = onRequestDeleteChat,
+                        onDeleteAllChats = onRequestDeleteAllChats
                     )
                 }
             }
 
             Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                // Top Bar (56dp) with always-accessible ☰ Sidebar Toggle
+                // Top Bar (56dp): [☰] [Thinking Dropdown on Top-Left] [Title] [Tokens] [Settings] [+ Chat]
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -208,7 +209,7 @@ fun ChatScreen(
                         .background(palette.surface)
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     IconButton(
                         onClick = {
@@ -224,6 +225,15 @@ fun ChatScreen(
                             contentDescription = "Toggle Sidebar",
                             tint = palette.onSurface,
                             modifier = Modifier.size(21.dp)
+                        )
+                    }
+
+                    // Top-Left Collapsible Thinking Dropdown (auto-shown only when model supports thinking)
+                    if (supportsThinking && chatMode == ChatMode.CHAT) {
+                        ThinkingTopDropdown(
+                            thinkingEnabled = thinkingEnabled,
+                            thinkingEffort = thinkingEffort,
+                            onSelect = onSelectThinkingEffort
                         )
                     }
 
@@ -296,24 +306,56 @@ fun ChatScreen(
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
-                // Message List with Vertical Scrollbar Slider
+                // Message List with rock-solid manual-scroll-friendly auto-scroll + Vertical Scrollbar
                 val listState = rememberLazyListState()
-                val isNearBottom by remember {
-                    derivedStateOf {
-                        val info = listState.layoutInfo
-                        val total = info.totalItemsCount
-                        if (total == 0) true
-                        else {
-                            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-                            lastVisible >= total - 2
-                        }
+                var autoScrollEnabled by remember(activeChat.id) { mutableStateOf(true) }
+                var prevIdx by remember(activeChat.id) { mutableStateOf(0) }
+                var prevOff by remember(activeChat.id) { mutableStateOf(0) }
+                var programmaticScroll by remember(activeChat.id) { mutableStateOf(false) }
+
+                // Re-enable auto-scroll whenever user sends a new message
+                LaunchedEffect(activeChat.messages.lastOrNull()?.id) {
+                    if (activeChat.messages.lastOrNull()?.role == "user") {
+                        autoScrollEnabled = true
                     }
                 }
 
-                LaunchedEffect(activeChat.id, activeChat.messages.size, streamingText.length, isStreaming) {
-                    val count = activeChat.messages.size + if (isStreaming) 1 else 0
-                    if (count > 0 && isNearBottom) {
-                        runCatching { listState.scrollToItem(count - 1) }
+                // Respect manual scrolling immediately without ever fighting the user
+                LaunchedEffect(listState, activeChat.id) {
+                    snapshotFlow {
+                        Triple(
+                            listState.isScrollInProgress,
+                            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset,
+                            listState.canScrollForward
+                        )
+                    }.collect { (scrolling, pos, canForward) ->
+                        val (idx, off) = pos
+                        if (scrolling && !programmaticScroll) {
+                            val scrolledUp = idx < prevIdx || (idx == prevIdx && off < prevOff)
+                            if (scrolledUp) {
+                                autoScrollEnabled = false
+                            } else if (!canForward) {
+                                autoScrollEnabled = true
+                            }
+                        } else if (!scrolling && !canForward) {
+                            autoScrollEnabled = true
+                        }
+                        prevIdx = idx
+                        prevOff = off
+                    }
+                }
+
+                // Target the 1dp bottom anchor item so tall streaming bubbles never jump to their top!
+                val totalListItems = activeChat.messages.size + (if (isStreaming) 1 else 0) + 1
+                LaunchedEffect(activeChat.id, activeChat.messages.size, streamingText.length, isStreaming, autoScrollEnabled) {
+                    if (autoScrollEnabled && (activeChat.messages.isNotEmpty() || isStreaming)) {
+                        programmaticScroll = true
+                        try {
+                            listState.scrollToItem((totalListItems - 1).coerceAtLeast(0))
+                        } catch (_: Exception) {
+                        } finally {
+                            programmaticScroll = false
+                        }
                     }
                 }
 
@@ -335,11 +377,11 @@ fun ChatScreen(
                             Spacer(Modifier.height(8.dp))
                             val emptySub = when {
                                 activeApi == null -> "Add an API using + API in the sidebar first."
-                                chatMode == ChatMode.IMAGE -> "Describe an image below to generate it locally or via API."
+                                chatMode == ChatMode.IMAGE -> "Describe an image (and optionally attach a reference image) to generate."
                                 chatMode == ChatMode.AUDIO -> "Type text below to synthesize natural speech audio."
-                                chatMode == ChatMode.VIDEO -> "Describe a video scene below to generate a clip."
+                                chatMode == ChatMode.VIDEO -> "Describe a video scene (and optionally attach a reference image) to generate."
                                 activeApi.isBuiltInLocal && !localServerRunning ->
-                                    "Your local SaMu Lab server is currently stopped. Start it in the Server tab or switch to Image/Audio/Video mode."
+                                    "Your local SaMu Lab server is currently stopped. Start it in the Server tab or switch modes below."
                                 else -> "Attach PDFs, Docs, Code, Images, Audio or just type below."
                             }
                             Text(
@@ -403,9 +445,13 @@ fun ChatScreen(
                                     )
                                 }
                             }
+
+                            // 1dp anchor ensures scrollToItem always snaps to the true bottom of tall messages
+                            item(key = "__bottom_anchor__") {
+                                Spacer(Modifier.height(1.dp))
+                            }
                         }
 
-                        // Draggable Vertical Scrollbar Slider for Chat History
                         VerticalScrollbar(
                             adapter = rememberScrollbarAdapter(listState),
                             style = samuScrollbarStyle(),
@@ -415,7 +461,7 @@ fun ChatScreen(
                                 .padding(end = 3.dp, top = 4.dp, bottom = 4.dp)
                         )
 
-                        if (!isNearBottom && (activeChat.messages.isNotEmpty() || isStreaming)) {
+                        if (!autoScrollEnabled && (activeChat.messages.isNotEmpty() || isStreaming)) {
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
@@ -424,10 +470,14 @@ fun ChatScreen(
                                     .clip(CircleShape)
                                     .background(palette.primary)
                                     .clickable {
-                                        val count = activeChat.messages.size + if (isStreaming) 1 else 0
-                                        if (count > 0) {
-                                            scope.launch {
-                                                runCatching { listState.animateScrollToItem(count - 1) }
+                                        autoScrollEnabled = true
+                                        scope.launch {
+                                            programmaticScroll = true
+                                            try {
+                                                listState.animateScrollToItem((totalListItems - 1).coerceAtLeast(0))
+                                            } catch (_: Exception) {
+                                            } finally {
+                                                programmaticScroll = false
                                             }
                                         }
                                     },
@@ -452,11 +502,6 @@ fun ChatScreen(
                     isStreaming = isStreaming,
                     chatMode = chatMode,
                     onChatModeChange = onChatModeChange,
-                    supportsThinking = supportsThinking && chatMode == ChatMode.CHAT,
-                    thinkingEnabled = thinkingEnabled,
-                    thinkingEffort = thinkingEffort,
-                    onToggleThinking = onToggleThinking,
-                    onThinkingEffortChange = onThinkingEffortChange,
                     onPickFile = {
                         openFilePicker("Attach Any File (PDF, Doc, MD, Code, Audio, Image)")?.let { f ->
                             val kind = FileAnalyzer.classify(f)
@@ -472,7 +517,12 @@ fun ChatScreen(
                         }
                     },
                     onPickImage = {
-                        openFilePicker("Attach Image", setOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"))?.let { f ->
+                        val title = when (chatMode) {
+                            ChatMode.IMAGE -> "Attach Reference Image for Image Generation"
+                            ChatMode.VIDEO -> "Attach Reference Image for Video Generation"
+                            else -> "Attach Image"
+                        }
+                        openFilePicker(title, setOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"))?.let { f ->
                             onAddAttachment(ChatAttachment(f.absolutePath, f.name, true, f.length(), "image"))
                         }
                     },
@@ -520,7 +570,96 @@ fun ChatScreen(
                     onSelectChat = { onSelectChat(it); mobileDrawerOpen = false },
                     onRenameChat = { mobileDrawerOpen = false; onRequestRenameChat(it) },
                     onDownloadChat = { mobileDrawerOpen = false; onDownloadChat(it) },
-                    onDeleteChat = { mobileDrawerOpen = false; onRequestDeleteChat(it) }
+                    onDeleteChat = { mobileDrawerOpen = false; onRequestDeleteChat(it) },
+                    onDeleteAllChats = { mobileDrawerOpen = false; onRequestDeleteAllChats() }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThinkingTopDropdown(
+    thinkingEnabled: Boolean,
+    thinkingEffort: ThinkingEffort,
+    onSelect: (ThinkingEffort) -> Unit
+) {
+    val palette = LocalSaMuColors.current
+    var expanded by remember { mutableStateOf(false) }
+    val activeEffort = if (thinkingEnabled) thinkingEffort else ThinkingEffort.OFF
+
+    Box {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(if (activeEffort != ThinkingEffort.OFF) palette.primary.copy(alpha = 0.16f) else palette.background)
+                .border(
+                    1.dp,
+                    if (activeEffort != ThinkingEffort.OFF) palette.primary else palette.divider,
+                    RoundedCornerShape(16.dp)
+                )
+                .clickable { expanded = true }
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                Icons.Filled.Psychology,
+                contentDescription = "Thinking Mode",
+                tint = if (activeEffort != ThinkingEffort.OFF) palette.primary else palette.textSecondary,
+                modifier = Modifier.size(15.dp)
+            )
+            Text(
+                text = "Think: ${activeEffort.label}",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (activeEffort != ThinkingEffort.OFF) palette.primary else palette.textSecondary
+            )
+            Icon(
+                Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                tint = if (activeEffort != ThinkingEffort.OFF) palette.primary else palette.textSecondary,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .widthIn(min = 165.dp)
+                .background(palette.surface, RoundedCornerShape(10.dp))
+                .border(1.dp, palette.divider, RoundedCornerShape(10.dp))
+        ) {
+            val options = listOf(
+                Triple(ThinkingEffort.OFF, "Off (Skip)", "Direct fast answer"),
+                Triple(ThinkingEffort.LOW, "Low", "Brief reasoning"),
+                Triple(ThinkingEffort.HIGH, "High", "Balanced reasoning"),
+                Triple(ThinkingEffort.MAX, "Max", "Deep full reasoning")
+            )
+            options.forEach { (eff, title, sub) ->
+                val isSelected = activeEffort == eff
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(
+                                title,
+                                fontSize = 13.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isSelected) palette.primary else palette.onSurface
+                            )
+                            Text(sub, fontSize = 10.sp, color = palette.textTertiary)
+                        }
+                    },
+                    trailingIcon = {
+                        if (isSelected) {
+                            Icon(Icons.Filled.Check, contentDescription = null, tint = palette.primary, modifier = Modifier.size(16.dp))
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(eff)
+                    }
                 )
             }
         }
@@ -542,7 +681,8 @@ private fun ChatSidebar(
     onSelectChat: (ChatSession) -> Unit,
     onRenameChat: (ChatSession) -> Unit,
     onDownloadChat: (ChatSession) -> Unit,
-    onDeleteChat: (ChatSession) -> Unit
+    onDeleteChat: (ChatSession) -> Unit,
+    onDeleteAllChats: () -> Unit
 ) {
     val palette = LocalSaMuColors.current
     val scale = LocalFontScale.current
@@ -694,14 +834,35 @@ private fun ChatSidebar(
 
                     Spacer(Modifier.height(12.dp))
 
-                    Text(
-                        text = "CHATS",
-                        fontSize = (10f * scale).sp,
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 0.5.sp,
-                        color = palette.textSecondary,
-                        modifier = Modifier.padding(start = 6.dp, bottom = 8.dp)
-                    )
+                    // Chats Header + Delete All Button
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 6.dp, end = 4.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "CHATS (${chats.size})",
+                            fontSize = (10f * scale).sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.5.sp,
+                            color = palette.textSecondary
+                        )
+                        if (chats.size > 1 || chats.firstOrNull()?.messages?.isNotEmpty() == true) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable(onClick = onDeleteAllChats)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete All Chats", tint = palette.error, modifier = Modifier.size(12.dp))
+                                Text("Delete All", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = palette.error)
+                            }
+                        }
+                    }
 
                     chats.forEach { chat ->
                         val active = chat.id == activeChatId
@@ -789,7 +950,6 @@ private fun ChatSidebar(
                     }
                 }
 
-                // Vertical Scrollbar Slider for Sidebar History
                 VerticalScrollbar(
                     adapter = rememberScrollbarAdapter(sidebarScroll),
                     style = samuScrollbarStyle(),
@@ -930,7 +1090,6 @@ private fun MessageBubbleItem(
                     }
                 }
 
-                // Clean Icon-Only Action Bar
                 if (!message.isError) {
                     Row(
                         modifier = Modifier.padding(top = 4.dp),
@@ -1121,7 +1280,6 @@ private fun AssistantMessageBody(
     val isStillThinking = parsed.isStillThinking
     val mainText = parsed.mainText
 
-    // Auto-expand while live thinking is streaming (unless user hides it); auto-collapse once thinking finishes!
     var thinkExpanded by remember { mutableStateOf(isStreaming && isStillThinking) }
     var userToggledDuringThink by remember { mutableStateOf(false) }
 
@@ -1129,7 +1287,6 @@ private fun AssistantMessageBody(
         if (isStreaming && isStillThinking && !userToggledDuringThink) {
             thinkExpanded = true
         } else if (!isStillThinking) {
-            // Automatically hide thinking once model moves to final answer or finishes!
             thinkExpanded = false
             userToggledDuringThink = false
         }
@@ -1282,11 +1439,6 @@ private fun ChatInputBar(
     isStreaming: Boolean,
     chatMode: ChatMode,
     onChatModeChange: (ChatMode) -> Unit,
-    supportsThinking: Boolean,
-    thinkingEnabled: Boolean,
-    thinkingEffort: ThinkingEffort,
-    onToggleThinking: () -> Unit,
-    onThinkingEffortChange: (ThinkingEffort) -> Unit,
     onPickFile: () -> Unit,
     onPickImage: () -> Unit,
     onRemoveAttachment: (ChatAttachment) -> Unit,
@@ -1297,166 +1449,95 @@ private fun ChatInputBar(
     val palette = LocalSaMuColors.current
     val scale = LocalFontScale.current
     val canSend = (text.isNotBlank() || attachments.isNotEmpty()) && !isStreaming
-    val toolbarScroll = rememberScrollState()
+    var modeMenuOpen by remember { mutableStateOf(false) }
+
+    val modeMeta = when (chatMode) {
+        ChatMode.CHAT -> Icons.Filled.Forum to "Chat"
+        ChatMode.IMAGE -> Icons.Filled.Image to "Image"
+        ChatMode.AUDIO -> Icons.Filled.Audiotrack to "Audio"
+        ChatMode.VIDEO -> Icons.Filled.Movie to "Video"
+    }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(palette.surface)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // Mode Switcher (Chat | Image | Audio | Video) + Auto-Detected Thinking Control
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(toolbarScroll),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            val modes = listOf(
-                ChatMode.CHAT to Icons.Filled.Forum,
-                ChatMode.IMAGE to Icons.Filled.Image,
-                ChatMode.AUDIO to Icons.Filled.Audiotrack,
-                ChatMode.VIDEO to Icons.Filled.Movie
-            )
-            modes.forEach { (mode, icon) ->
-                val active = chatMode == mode
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (active) palette.primary.copy(alpha = 0.18f) else palette.background)
-                        .border(1.dp, if (active) palette.primary else palette.divider, RoundedCornerShape(16.dp))
-                        .clickable { onChatModeChange(mode) }
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(icon, contentDescription = mode.label, tint = if (active) palette.primary else palette.textSecondary, modifier = Modifier.size(13.dp))
-                    Text(
-                        mode.label,
-                        fontSize = 11.sp,
-                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (active) palette.primary else palette.textSecondary
-                    )
-                }
-            }
-
-            // ONLY visible when the active model actually supports Thinking!
-            if (supportsThinking) {
-                Box(Modifier.width(1.dp).height(18.dp).background(palette.divider))
-
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (thinkingEnabled) palette.primary.copy(alpha = 0.2f) else palette.background)
-                        .border(1.dp, if (thinkingEnabled) palette.primary else palette.divider, RoundedCornerShape(16.dp))
-                        .clickable(onClick = onToggleThinking)
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        Icons.Filled.Psychology,
-                        contentDescription = "Toggle Thinking",
-                        tint = if (thinkingEnabled) palette.primary else palette.textTertiary,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Text(
-                        text = if (thinkingEnabled) "Think: ON" else "Think: OFF",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (thinkingEnabled) palette.primary else palette.textSecondary
-                    )
-                }
-
-                if (thinkingEnabled) {
-                    listOf(ThinkingEffort.LOW, ThinkingEffort.HIGH, ThinkingEffort.MAX).forEach { eff ->
-                        val active = thinkingEffort == eff
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (active) palette.primary else palette.background)
-                                .border(1.dp, if (active) palette.primary else palette.divider, RoundedCornerShape(12.dp))
-                                .clickable { onThinkingEffortChange(eff) }
-                                .padding(horizontal = 8.dp, vertical = 3.dp)
-                        ) {
-                            Text(
-                                eff.label,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = if (active) Color.White else palette.textSecondary
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
         if (attachments.isNotEmpty()) {
             val attScroll = rememberScrollState()
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(attScroll)
-                    .padding(bottom = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                attachments.forEach { att ->
-                    Box(modifier = Modifier.size(56.dp)) {
-                        if (att.isImage) {
-                            val bmp = remember(att.path) { loadImageBitmapSafe(att.path) }
-                            if (bmp != null) {
-                                Image(
-                                    bitmap = bmp,
-                                    contentDescription = att.name,
-                                    contentScale = ContentScale.Crop,
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(attScroll)
+                        .padding(bottom = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    attachments.forEach { att ->
+                        Box(modifier = Modifier.size(56.dp)) {
+                            if (att.isImage) {
+                                val bmp = remember(att.path) { loadImageBitmapSafe(att.path) }
+                                if (bmp != null) {
+                                    Image(
+                                        bitmap = bmp,
+                                        contentDescription = att.name,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { onOpenLightbox(att) }
+                                    )
+                                }
+                            } else {
+                                val icon = when (att.kind.lowercase()) {
+                                    "pdf", "document" -> Icons.Filled.Description
+                                    "audio" -> Icons.Filled.Audiotrack
+                                    "video" -> Icons.Filled.Movie
+                                    "code_text" -> Icons.Filled.Code
+                                    else -> Icons.Filled.AttachFile
+                                }
+                                Column(
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .clip(RoundedCornerShape(8.dp))
-                                        .clickable { onOpenLightbox(att) }
-                                )
+                                        .background(palette.surfaceVariant)
+                                        .padding(4.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(icon, contentDescription = null, tint = palette.primary, modifier = Modifier.size(20.dp))
+                                    Text(
+                                        att.name,
+                                        fontSize = 9.sp,
+                                        color = palette.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
-                        } else {
-                            val icon = when (att.kind.lowercase()) {
-                                "pdf", "document" -> Icons.Filled.Description
-                                "audio" -> Icons.Filled.Audiotrack
-                                "video" -> Icons.Filled.Movie
-                                "code_text" -> Icons.Filled.Code
-                                else -> Icons.Filled.AttachFile
-                            }
-                            Column(
+                            Box(
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(palette.surfaceVariant)
-                                    .padding(4.dp),
-                                verticalArrangement = Arrangement.Center,
-                                horizontalAlignment = Alignment.CenterHorizontally
+                                    .align(Alignment.TopEnd)
+                                    .padding(2.dp)
+                                    .size(16.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFE53935))
+                                    .clickable { onRemoveAttachment(att) },
+                                contentAlignment = Alignment.Center
                             ) {
-                                Icon(icon, contentDescription = null, tint = palette.primary, modifier = Modifier.size(20.dp))
-                                Text(
-                                    att.name,
-                                    fontSize = 9.sp,
-                                    color = palette.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Icon(Icons.Filled.Close, contentDescription = "Remove", tint = Color.White, modifier = Modifier.size(10.dp))
                             }
-                        }
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(2.dp)
-                                .size(16.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFFE53935))
-                                .clickable { onRemoveAttachment(att) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Filled.Close, contentDescription = "Remove", tint = Color.White, modifier = Modifier.size(10.dp))
                         }
                     }
+                }
+                if (attScroll.maxValue > 0) {
+                    HorizontalScrollbar(
+                        adapter = rememberScrollbarAdapter(attScroll),
+                        style = samuScrollbarStyle(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                    )
                 }
             }
         }
@@ -1464,14 +1545,80 @@ private fun ChatInputBar(
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.Bottom
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            if (chatMode == ChatMode.CHAT) {
-                IconButton(onClick = onPickFile, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Filled.AttachFile, contentDescription = "Attach file", tint = palette.primary, modifier = Modifier.size(20.dp))
+            // Single Compact Mode Dropdown (Chat / Image / Audio / Video)
+            Box {
+                Row(
+                    modifier = Modifier
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(palette.primary.copy(alpha = 0.14f))
+                        .border(1.dp, palette.primary.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
+                        .clickable { modeMenuOpen = true }
+                        .padding(horizontal = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Icon(modeMeta.first, contentDescription = modeMeta.second, tint = palette.primary, modifier = Modifier.size(16.dp))
+                    Text(modeMeta.second, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = palette.primary)
+                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Switch Mode", tint = palette.primary, modifier = Modifier.size(15.dp))
                 }
-                IconButton(onClick = onPickImage, modifier = Modifier.size(40.dp)) {
+
+                DropdownMenu(
+                    expanded = modeMenuOpen,
+                    onDismissRequest = { modeMenuOpen = false },
+                    modifier = Modifier
+                        .widthIn(min = 180.dp)
+                        .background(palette.surface, RoundedCornerShape(10.dp))
+                        .border(1.dp, palette.divider, RoundedCornerShape(10.dp))
+                ) {
+                    val modes = listOf(
+                        Triple(ChatMode.CHAT, Icons.Filled.Forum, "Text, Vision & Files"),
+                        Triple(ChatMode.IMAGE, Icons.Filled.Image, "Generate Image (+ Ref)"),
+                        Triple(ChatMode.AUDIO, Icons.Filled.Audiotrack, "Text to Speech Audio"),
+                        Triple(ChatMode.VIDEO, Icons.Filled.Movie, "Generate Video (+ Ref)")
+                    )
+                    modes.forEach { (m, icon, sub) ->
+                        val active = chatMode == m
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        m.label,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (active) palette.primary else palette.onSurface
+                                    )
+                                    Text(sub, fontSize = 10.sp, color = palette.textTertiary)
+                                }
+                            },
+                            leadingIcon = {
+                                Icon(icon, contentDescription = null, tint = if (active) palette.primary else palette.textSecondary, modifier = Modifier.size(17.dp))
+                            },
+                            trailingIcon = {
+                                if (active) Icon(Icons.Filled.Check, contentDescription = null, tint = palette.primary, modifier = Modifier.size(16.dp))
+                            },
+                            onClick = {
+                                modeMenuOpen = false
+                                onChatModeChange(m)
+                            }
+                        )
+                    }
+                }
+            }
+
+            // Attachment Icons: Chat -> File + Image | Image & Video -> Reference Image
+            if (chatMode == ChatMode.CHAT) {
+                IconButton(onClick = onPickFile, modifier = Modifier.size(38.dp)) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = "Attach any file", tint = palette.primary, modifier = Modifier.size(20.dp))
+                }
+                IconButton(onClick = onPickImage, modifier = Modifier.size(38.dp)) {
                     Icon(Icons.Filled.Image, contentDescription = "Attach image", tint = palette.primary, modifier = Modifier.size(20.dp))
+                }
+            } else if (chatMode == ChatMode.IMAGE || chatMode == ChatMode.VIDEO) {
+                IconButton(onClick = onPickImage, modifier = Modifier.size(38.dp)) {
+                    Icon(Icons.Filled.Image, contentDescription = "Attach reference image", tint = palette.primary, modifier = Modifier.size(20.dp))
                 }
             }
 
@@ -1488,9 +1635,9 @@ private fun ChatInputBar(
                 if (text.isEmpty()) {
                     val hint = when (chatMode) {
                         ChatMode.CHAT -> "Ask anything or attach PDF, code, image, audio..."
-                        ChatMode.IMAGE -> "Describe the image to generate..."
+                        ChatMode.IMAGE -> "Describe image (optional: attach ref image)..."
                         ChatMode.AUDIO -> "Type text to convert to speech audio..."
-                        ChatMode.VIDEO -> "Describe the video clip to generate..."
+                        ChatMode.VIDEO -> "Describe video (optional: attach ref image)..."
                     }
                     Text(
                         text = hint,

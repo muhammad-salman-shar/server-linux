@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -145,6 +146,23 @@ private fun SaMuLabRoot(
     var serverStatusErr by remember { mutableStateOf(false) }
     var engineSupportsThinking by remember { mutableStateOf(false) }
 
+    // Automatically inspect loaded GGUF model's exact native max context window
+    val loadedModelNativeMaxCtx = remember(loadedModelPath) {
+        val f = loadedModelPath?.let { File(it) }
+        if (f != null && f.isFile && serverSettings.profileFor(f).kind == ModelKind.TEXT_VISION) {
+            GgufInspector.inspect(f).nativeContext
+        } else 0
+    }
+
+    // Clamp on initial startup if stored context exceeds current model's native max
+    LaunchedEffect(loadedModelNativeMaxCtx) {
+        if (loadedModelNativeMaxCtx > 0 && (serverSettings.contextSize <= 0 || serverSettings.contextSize > loadedModelNativeMaxCtx)) {
+            val fixed = serverSettings.copy(contextSize = loadedModelNativeMaxCtx)
+            serverSettings = fixed
+            SettingsStore.save(fixed)
+        }
+    }
+
     LaunchedEffect(Unit) {
         while (true) {
             delay(5000)
@@ -177,7 +195,6 @@ private fun SaMuLabRoot(
         allApis.firstOrNull { it.id == chatPrefs.activeApiId } ?: allApis.firstOrNull()
     }
 
-    // Auto-detect Thinking support for the active API/model
     val supportsThinking = remember(activeApi, serverRunning, engineSupportsThinking, loadedModelPath, serverSettings.modelProfiles) {
         val api = activeApi
         when {
@@ -187,11 +204,11 @@ private fun SaMuLabRoot(
                     engineSupportsThinking
                 } else {
                     val f = loadedModelPath?.let { File(it) }
-                    if (f != null) {
+                    if (f != null && f.isFile) {
                         when (serverSettings.profileFor(f).thinkingMode) {
                             ThinkingSupportMode.ENABLED -> true
                             ThinkingSupportMode.DISABLED -> false
-                            ThinkingSupportMode.AUTO -> nameHintsThinking(f.name)
+                            ThinkingSupportMode.AUTO -> nameHintsThinking(f.name) || GgufInspector.inspect(f).templateHintsThinking
                         }
                     } else false
                 }
@@ -222,10 +239,12 @@ private fun SaMuLabRoot(
     var showApiModal by remember { mutableStateOf(false) }
     var editingApi by remember { mutableStateOf<ApiConfig?>(null) }
     var showChatSettingsModal by remember { mutableStateOf(false) }
+    var showQuickGuide by remember { mutableStateOf(false) }
     var lightboxAttachment by remember { mutableStateOf<ChatAttachment?>(null) }
     var selectingText by remember { mutableStateOf<String?>(null) }
     var renamingChat by remember { mutableStateOf<ChatSession?>(null) }
     var deletingChat by remember { mutableStateOf<ChatSession?>(null) }
+    var confirmDeleteAllChats by remember { mutableStateOf(false) }
     var deletingApi by remember { mutableStateOf<ApiConfig?>(null) }
     var toastMsg by remember { mutableStateOf<String?>(null) }
 
@@ -252,6 +271,16 @@ private fun SaMuLabRoot(
         serverStatusErr = error
     }
 
+    fun autoFillContextForModel(file: File): AppSettings {
+        val info = GgufInspector.inspect(file)
+        return if (info.nativeContext > 0) {
+            val updated = serverSettings.copy(contextSize = info.nativeContext)
+            serverSettings = updated
+            SettingsStore.save(updated)
+            updated
+        } else serverSettings
+    }
+
     fun stopServer(clearModel: Boolean = false) {
         runCatching { apiServer?.stop() }
         apiServer = null
@@ -272,7 +301,7 @@ private fun SaMuLabRoot(
             serverRunning = true
             monitor.markReady()
             val host = if (serverSettings.lanAccess) localIp else "127.0.0.1"
-            setServerStatus("Media API running on http://$host:${serverSettings.port}/v1", error = false)
+            setServerStatus("Media API running on " + "http" + "://$host:${serverSettings.port}/v1", error = false)
         } catch (e: Exception) {
             apiServer = null
             serverRunning = false
@@ -281,13 +310,13 @@ private fun SaMuLabRoot(
         }
     }
 
-    fun startServerWithModel(modelFile: File) {
+    fun startServerWithModel(modelFile: File, activeSettings: AppSettings = serverSettings) {
         if (isStarting) return
         if (!modelFile.exists()) {
             setServerStatus("Model file not found: ${modelFile.name}", error = true)
             return
         }
-        val profile = serverSettings.profileFor(modelFile)
+        val profile = activeSettings.profileFor(modelFile)
         if (profile.kind != ModelKind.TEXT_VISION) {
             startMediaOnlyServer()
             return
@@ -301,7 +330,7 @@ private fun SaMuLabRoot(
 
         engine.ensureEngineAndStart(
             modelPath = modelFile.toPath(),
-            settings = serverSettings,
+            settings = activeSettings,
             profile = profile,
             onProgress = { msg ->
                 scope.launch(Dispatchers.Main) {
@@ -322,10 +351,11 @@ private fun SaMuLabRoot(
                             val capsNote = buildList {
                                 if (engine.capabilities.supportsThinking) add("Thinking")
                                 if (engine.capabilities.supportsVision) add("Vision")
+                                if (engine.capabilities.nativeContext > 0) add("MaxCtx=${engine.capabilities.nativeContext}")
                             }.joinToString(" + ")
-                            if (capsNote.isNotBlank()) monitor.log("INFO", "Detected capabilities: $capsNote")
+                            if (capsNote.isNotBlank()) monitor.log("INFO", "Detected: $capsNote")
                             val host = if (serverSettings.lanAccess) localIp else "127.0.0.1"
-                            setServerStatus("Running on http://$host:${serverSettings.port}/v1", error = false)
+                            setServerStatus("Running on " + "http" + "://$host:${serverSettings.port}/v1", error = false)
                         } catch (e: Exception) {
                             engine.stop()
                             apiServer = null
@@ -357,8 +387,7 @@ private fun SaMuLabRoot(
         )
     }
 
-    // --- Media Generation (Image / Audio / Video) ---
-    fun runMediaGeneration(chatId: String, mode: ChatMode, prompt: String) {
+    fun runMediaGeneration(chatId: String, mode: ChatMode, prompt: String, refImage: File? = null) {
         val api = activeApi
         if (api == null) {
             showToast("Select or add an API first.")
@@ -366,9 +395,9 @@ private fun SaMuLabRoot(
         }
         isStreaming = true
         streamingText = when (mode) {
-            ChatMode.IMAGE -> "Generating image..."
+            ChatMode.IMAGE -> if (refImage != null) "Generating image from reference..." else "Generating image..."
             ChatMode.AUDIO -> "Synthesizing audio..."
-            ChatMode.VIDEO -> "Generating video..."
+            ChatMode.VIDEO -> if (refImage != null) "Generating video from reference..." else "Generating video..."
             ChatMode.CHAT -> ""
         }
         streamingChatId = chatId
@@ -379,7 +408,7 @@ private fun SaMuLabRoot(
                 val fileRes = when (mode) {
                     ChatMode.IMAGE -> {
                         val m = models.firstOrNull { serverSettings.profileFor(it).kind == ModelKind.IMAGE_GEN }
-                        mediaEngines.generateImage(prompt, m, m?.let { serverSettings.profileFor(it) }, serverSettings) { p ->
+                        mediaEngines.generateImage(prompt, m, m?.let { serverSettings.profileFor(it) }, serverSettings, referenceImage = refImage) { p ->
                             scope.launch(Dispatchers.Main) { streamingText = p }
                         }
                     }
@@ -391,7 +420,7 @@ private fun SaMuLabRoot(
                     }
                     ChatMode.VIDEO -> {
                         val m = models.firstOrNull { serverSettings.profileFor(it).kind == ModelKind.VIDEO_GEN }
-                        mediaEngines.generateVideo(prompt, m, m?.let { serverSettings.profileFor(it) }, serverSettings) { p ->
+                        mediaEngines.generateVideo(prompt, m, m?.let { serverSettings.profileFor(it) }, serverSettings, referenceImage = refImage) { p ->
                             scope.launch(Dispatchers.Main) { streamingText = p }
                         }
                     }
@@ -423,9 +452,9 @@ private fun SaMuLabRoot(
                 )
             } else {
                 when (mode) {
-                    ChatMode.IMAGE -> chatClient.requestImageGeneration(api, prompt)
+                    ChatMode.IMAGE -> chatClient.requestImageGeneration(api, prompt, referenceImage = refImage)
                     ChatMode.AUDIO -> chatClient.requestAudioGeneration(api, prompt)
-                    ChatMode.VIDEO -> chatClient.requestVideoGeneration(api, prompt)
+                    ChatMode.VIDEO -> chatClient.requestVideoGeneration(api, prompt, referenceImage = refImage)
                     ChatMode.CHAT -> Result.failure(Exception("Unsupported media mode"))
                 }
             }
@@ -449,7 +478,6 @@ private fun SaMuLabRoot(
         }
     }
 
-    // --- Chat Controls ---
     fun runAssistantForChat(chatId: String, history: List<ChatMessage>) {
         val api = activeApi
         if (api == null) {
@@ -480,7 +508,7 @@ private fun SaMuLabRoot(
                 history = history,
                 globalInstructions = globalInstr,
                 supportsThinking = supportsThinking,
-                thinkingEnabled = chatPrefs.thinkingEnabled,
+                thinkingEnabled = chatPrefs.thinkingEnabled && chatPrefs.thinkingEffort != ThinkingEffort.OFF,
                 thinkingEffort = chatPrefs.thinkingEffort,
                 onDelta = { partial ->
                     scope.launch(Dispatchers.Main) {
@@ -512,10 +540,11 @@ private fun SaMuLabRoot(
         val trimmed = inputText.trim()
         if ((trimmed.isEmpty() && attachments.isEmpty()) || isStreaming) return
         val targetChat = activeChat
+        val currentAtts = attachments
         val userMsg = ChatMessage(
             role = "user",
             content = trimmed,
-            attachments = attachments
+            attachments = currentAtts
         )
         val isFirst = targetChat.messages.isEmpty()
         val autoTitle = if (isFirst && trimmed.isNotBlank()) {
@@ -532,7 +561,8 @@ private fun SaMuLabRoot(
         if (chatMode == ChatMode.CHAT) {
             runAssistantForChat(targetChat.id, newHistory)
         } else {
-            runMediaGeneration(targetChat.id, chatMode, trimmed)
+            val refImg = currentAtts.firstOrNull { it.isImage }?.let { File(it.path) }?.takeIf { it.isFile }
+            runMediaGeneration(targetChat.id, chatMode, trimmed, refImg)
         }
     }
 
@@ -567,7 +597,9 @@ private fun SaMuLabRoot(
                 "video" -> ChatMode.VIDEO
                 else -> ChatMode.CHAT
             }
-            runMediaGeneration(activeChat.id, m, med.prompt)
+            val lastRef = trimmedHistory.lastOrNull { it.role == "user" }
+                ?.attachments?.firstOrNull { it.isImage }?.let { File(it.path) }?.takeIf { it.isFile }
+            runMediaGeneration(activeChat.id, m, med.prompt, lastRef)
         } else if (trimmedHistory.isNotEmpty()) {
             runAssistantForChat(activeChat.id, trimmedHistory)
         }
@@ -597,10 +629,12 @@ private fun SaMuLabRoot(
                 ShortcutAction.CLOSE_MODALS -> {
                     showApiModal = false
                     showChatSettingsModal = false
+                    showQuickGuide = false
                     lightboxAttachment = null
                     selectingText = null
                     renamingChat = null
                     deletingChat = null
+                    confirmDeleteAllChats = false
                     deletingApi = null
                 }
             }
@@ -627,7 +661,7 @@ private fun SaMuLabRoot(
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Global Top Header with Centered [ Chat | Server ] Switcher
+            // Global Top Header with Centered [ Chat | Server ] Switcher + Quick Guide (?)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -688,7 +722,7 @@ private fun SaMuLabRoot(
                 Row(
                     modifier = Modifier.align(Alignment.CenterEnd),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -712,6 +746,18 @@ private fun SaMuLabRoot(
                                 color = palette.textSecondary
                             )
                         }
+                    }
+
+                    IconButton(
+                        onClick = { showQuickGuide = true },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.HelpOutline,
+                            contentDescription = "Quick Feature Guide",
+                            tint = palette.textSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
 
                     IconButton(
@@ -744,11 +790,13 @@ private fun SaMuLabRoot(
                         thinkingEffort = chatPrefs.thinkingEffort,
                         chatMode = chatMode,
                         onChatModeChange = { chatMode = it },
-                        onToggleThinking = {
-                            onUpdatePrefs(chatPrefs.copy(thinkingEnabled = !chatPrefs.thinkingEnabled))
-                        },
-                        onThinkingEffortChange = { eff ->
-                            onUpdatePrefs(chatPrefs.copy(thinkingEnabled = true, thinkingEffort = eff))
+                        onSelectThinkingEffort = { eff ->
+                            onUpdatePrefs(
+                                chatPrefs.copy(
+                                    thinkingEnabled = eff != ThinkingEffort.OFF,
+                                    thinkingEffort = eff
+                                )
+                            )
                         },
                         chats = chats,
                         activeChat = activeChat,
@@ -766,11 +814,7 @@ private fun SaMuLabRoot(
                             val err = audioPlayer.toggle(path) {
                                 scope.launch(Dispatchers.Main) { playingAudioPath = null }
                             }
-                            if (err != null) {
-                                showToast(err)
-                            } else {
-                                playingAudioPath = audioPlayer.playingPath
-                            }
+                            if (err != null) showToast(err) else playingAudioPath = audioPlayer.playingPath
                         },
                         onDownloadMedia = { med ->
                             val src = File(med.localPath)
@@ -819,6 +863,7 @@ private fun SaMuLabRoot(
                             if (saved != null) showToast("Saved to ${saved.name}")
                         },
                         onRequestDeleteChat = { deletingChat = it },
+                        onRequestDeleteAllChats = { confirmDeleteAllChats = true },
                         onOpenChatSettings = { showChatSettingsModal = true },
                         onSendMessage = ::sendCurrentMessage,
                         onStopStreaming = { chatClient.abort() },
@@ -846,6 +891,7 @@ private fun SaMuLabRoot(
                         isStarting = isStarting,
                         models = models,
                         loadedModelPath = loadedModelPath,
+                        loadedModelNativeMaxCtx = loadedModelNativeMaxCtx,
                         statusMessage = serverStatusMsg,
                         isStatusError = serverStatusErr,
                         telemetry = telemetry,
@@ -876,12 +922,17 @@ private fun SaMuLabRoot(
                             val profile = serverSettings.profileFor(file)
                             if (profile.kind != ModelKind.TEXT_VISION) {
                                 showToast("${file.name} is ready for ${profile.kind.label}!")
-                            } else if (serverRunning) {
-                                stopServer(clearModel = false)
-                                startServerWithModel(file)
                             } else {
-                                loadedModelPath = file.absolutePath
-                                setServerStatus("Loaded ${file.name}. Click Start Server.", error = false)
+                                // Auto-fill exact native max context window for this model!
+                                val updatedSettings = autoFillContextForModel(file)
+                                if (serverRunning) {
+                                    stopServer(clearModel = false)
+                                    startServerWithModel(file, updatedSettings)
+                                } else {
+                                    loadedModelPath = file.absolutePath
+                                    val ctxNote = if (updatedSettings.contextSize > 0) " (Max ctx: ${updatedSettings.contextSize})" else ""
+                                    setServerStatus("Loaded ${file.name}$ctxNote. Click Start Server.", error = false)
+                                }
                             }
                         },
                         onSaveModelProfile = { updatedProfile ->
@@ -917,8 +968,10 @@ private fun SaMuLabRoot(
                             SettingsStore.save(serverSettings)
                             models = scanModels(updatedPaths)
                             if (defaultProf.kind == ModelKind.TEXT_VISION) {
+                                val updatedSettings = autoFillContextForModel(pickedFile)
                                 loadedModelPath = pickedFile.path
-                                setServerStatus("Loaded ${pickedFile.name}. Click Start Server.", error = false)
+                                val ctxNote = if (updatedSettings.contextSize > 0) " (Max ctx: ${updatedSettings.contextSize})" else ""
+                                setServerStatus("Loaded ${pickedFile.name}$ctxNote. Click Start Server.", error = false)
                             } else {
                                 setServerStatus("Added ${pickedFile.name} (${defaultProf.kind.label}).", error = false)
                             }
@@ -944,6 +997,10 @@ private fun SaMuLabRoot(
         }
 
         // Modals
+        if (showQuickGuide) {
+            QuickGuideModal(onDismiss = { showQuickGuide = false })
+        }
+
         if (showApiModal) {
             ApiEditModal(
                 initial = editingApi,
@@ -1010,6 +1067,23 @@ private fun SaMuLabRoot(
                         onUpdatePrefs(chatPrefs.copy(activeChatId = activeChatId))
                     }
                     deletingChat = null
+                }
+            )
+        }
+
+        if (confirmDeleteAllChats) {
+            ConfirmDeleteModal(
+                title = "Delete All Chats",
+                message = "Delete all ${chats.size} chat(s) permanently? This cannot be undone.",
+                onDismiss = { confirmDeleteAllChats = false },
+                onConfirm = {
+                    if (isStreaming) chatClient.abort()
+                    val fresh = ChatSession(title = "New Chat")
+                    persistChats(listOf(fresh))
+                    activeChatId = fresh.id
+                    onUpdatePrefs(chatPrefs.copy(activeChatId = fresh.id))
+                    confirmDeleteAllChats = false
+                    showToast("All chats deleted")
                 }
             )
         }

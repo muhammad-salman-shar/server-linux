@@ -152,9 +152,7 @@ class ChatClient {
                 val enableThink = thinkingEnabled && thinkingEffort != ThinkingEffort.OFF
                 put("chat_template_kwargs", JSONObject().put("enable_thinking", enableThink))
                 put("reasoning_effort", if (enableThink) thinkingEffort.apiValue else "none")
-                if (!enableThink) {
-                    put("reasoning_budget", 0)
-                }
+                put("reasoning_budget", if (enableThink) thinkingEffort.budgetTokens else 0)
             }
         }
 
@@ -297,7 +295,7 @@ class ChatClient {
         }
     }
 
-    fun requestImageGeneration(api: ApiConfig, prompt: String): Result<GeneratedMedia> {
+    fun requestImageGeneration(api: ApiConfig, prompt: String, referenceImage: File? = null): Result<GeneratedMedia> {
         return runCatching {
             val endpoint = resolveEndpoint(api.baseUrl, "/images/generations")
             val bodyJson = JSONObject().apply {
@@ -305,6 +303,10 @@ class ChatClient {
                 put("prompt", prompt)
                 put("n", 1)
                 put("size", "512x512")
+                if (referenceImage != null && referenceImage.isFile) {
+                    runCatching { Base64.getEncoder().encodeToString(referenceImage.readBytes()) }
+                        .getOrNull()?.let { put("init_image_b64", it) }
+                }
             }.toString()
 
             val rb = Request.Builder()
@@ -379,12 +381,16 @@ class ChatClient {
         }
     }
 
-    fun requestVideoGeneration(api: ApiConfig, prompt: String): Result<GeneratedMedia> {
+    fun requestVideoGeneration(api: ApiConfig, prompt: String, referenceImage: File? = null): Result<GeneratedMedia> {
         return runCatching {
             val endpoint = resolveEndpoint(api.baseUrl, "/videos/generations")
             val bodyJson = JSONObject().apply {
                 put("model", api.modelName.ifBlank { "samu-video" })
                 put("prompt", prompt)
+                if (referenceImage != null && referenceImage.isFile) {
+                    runCatching { Base64.getEncoder().encodeToString(referenceImage.readBytes()) }
+                        .getOrNull()?.let { put("init_image_b64", it) }
+                }
             }.toString()
 
             val rb = Request.Builder()

@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,11 +32,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DesktopWindows
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
@@ -67,6 +71,13 @@ import androidx.compose.ui.unit.sp
 import java.io.File
 import java.util.Locale
 
+private fun formatCtxShort(ctx: Int): String = when {
+    ctx >= 1_000_000 -> "${ctx / 1_000_000}M"
+    ctx >= 1024 && ctx % 1024 == 0 -> "${ctx / 1024}K"
+    ctx >= 1000 -> "${ctx / 1000}K"
+    else -> ctx.toString()
+}
+
 @Composable
 fun ServerScreen(
     settings: AppSettings,
@@ -75,6 +86,7 @@ fun ServerScreen(
     isStarting: Boolean,
     models: List<File>,
     loadedModelPath: String?,
+    loadedModelNativeMaxCtx: Int,
     statusMessage: String?,
     isStatusError: Boolean,
     telemetry: ServerTelemetry,
@@ -92,10 +104,13 @@ fun ServerScreen(
     val palette = LocalSaMuColors.current
     val hw = remember { HardwareDetector.detect() }
     var showServerSettings by remember { mutableStateOf(false) }
+    var showConnectGuide by remember { mutableStateOf(false) }
     var configuringModelFile by remember { mutableStateOf<File?>(null) }
+    var otherDeviceSelected by remember { mutableStateOf(false) }
 
-    val displayHost = if (settings.lanAccess) localIp else "127.0.0.1"
-    val apiBaseUrl = "http" + "://$displayHost:${settings.port}/v1"
+    val thisDeviceUrl = "http" + "://127.0.0.1:${settings.port}/v1"
+    val otherDeviceUrl = "http" + "://$localIp:${settings.port}/v1"
+    val activeUrl = if (otherDeviceSelected) otherDeviceUrl else thisDeviceUrl
 
     Box(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -108,7 +123,7 @@ fun ServerScreen(
             // Left Column: Server Controls + Models
             Column(
                 modifier = Modifier.weight(1.25f).fillMaxHeight(),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -145,7 +160,7 @@ fun ServerScreen(
                             }
                         }
 
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(10.dp))
 
                         OutlinedTextField(
                             value = settings.modelApiName,
@@ -173,15 +188,66 @@ fun ServerScreen(
 
                         Spacer(Modifier.height(10.dp))
 
-                        ServerInfoRow(if (settings.lanAccess) "API URL" else "Local URL", apiBaseUrl)
+                        // URL Target Selector: This Device | Other Device (+ Connection Guide)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(palette.background)
+                                    .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
+                                    .padding(3.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                DeviceUrlChip(
+                                    label = "This Device",
+                                    icon = Icons.Filled.Computer,
+                                    selected = !otherDeviceSelected,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { otherDeviceSelected = false }
+                                )
+                                DeviceUrlChip(
+                                    label = "Other Device",
+                                    icon = Icons.Filled.Smartphone,
+                                    selected = otherDeviceSelected,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { otherDeviceSelected = true }
+                                )
+                            }
+                            if (otherDeviceSelected) {
+                                OutlinedButton(
+                                    onClick = { showConnectGuide = true },
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, palette.primary),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(Icons.Filled.Info, contentDescription = null, tint = palette.primary, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Setup Guide", fontSize = 11.sp, color = palette.primary)
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        ServerInfoRow(if (otherDeviceSelected) "Phone / LAN URL" else "Local URL", activeUrl)
                         ServerInfoRow("Model Name", settings.modelApiName)
-                        ServerInfoRow("Context Window", if (settings.contextSize == 0) "Auto (Model Max)" else settings.contextSize.toString())
+                        val ctxDisplay = buildString {
+                            append(if (settings.contextSize == 0) "Auto" else settings.contextSize.toString())
+                            if (loadedModelNativeMaxCtx > 0) append(" / $loadedModelNativeMaxCtx max")
+                        }
+                        ServerInfoRow("Context Window", ctxDisplay)
                         if (settings.requireAuth) {
                             ServerInfoRow("API Key", settings.apiKey)
                         }
 
                         statusMessage?.let { msg ->
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(6.dp))
                             Text(
                                 msg,
                                 color = if (isStatusError) palette.error else palette.success,
@@ -189,11 +255,11 @@ fun ServerScreen(
                             )
                         }
 
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(10.dp))
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
-                                onClick = { if (copyToClipboard(apiBaseUrl)) onCopyToast("API URL copied!") },
+                                onClick = { if (copyToClipboard(activeUrl)) onCopyToast("API URL copied!") },
                                 shape = RoundedCornerShape(8.dp),
                                 border = BorderStroke(1.dp, palette.divider),
                                 modifier = Modifier.weight(1f)
@@ -219,7 +285,7 @@ fun ServerScreen(
                         Button(
                             onClick = onStartOrStop,
                             shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.fillMaxWidth().height(44.dp),
+                            modifier = Modifier.fillMaxWidth().height(42.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (serverRunning || isStarting) palette.error else palette.primary
                             )
@@ -445,11 +511,23 @@ fun ServerScreen(
         if (showServerSettings) {
             ServerSettingsModal(
                 settings = settings,
+                loadedModelNativeMaxCtx = loadedModelNativeMaxCtx,
                 onDismiss = { showServerSettings = false },
                 onSave = { updated ->
                     showServerSettings = false
                     onSaveServerSettings(updated)
                 }
+            )
+        }
+
+        if (showConnectGuide) {
+            ConnectOtherDeviceModal(
+                localIp = localIp,
+                port = settings.port,
+                lanEnabled = settings.lanAccess,
+                requireAuth = settings.requireAuth,
+                onDismiss = { showConnectGuide = false },
+                onCopyToast = onCopyToast
             )
         }
 
@@ -464,6 +542,36 @@ fun ServerScreen(
                 }
             )
         }
+    }
+}
+
+@Composable
+private fun DeviceUrlChip(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val palette = LocalSaMuColors.current
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (selected) palette.primary else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(icon, contentDescription = null, tint = if (selected) Color.White else palette.textSecondary, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(5.dp))
+        Text(
+            label,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) Color.White else palette.textSecondary,
+            maxLines = 1
+        )
     }
 }
 
@@ -487,7 +595,7 @@ private fun StatTile(label: String, value: String, modifier: Modifier = Modifier
 private fun ServerInfoRow(label: String, value: String) {
     val palette = LocalSaMuColors.current
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text("$label: ", color = palette.textSecondary, fontSize = 12.sp)
@@ -509,6 +617,9 @@ private fun ServerModelRow(
     val mb = file.length() / (1024.0 * 1024.0)
     val sizeText = if (mb >= 1024) String.format(Locale.US, "%.2f GB", mb / 1024.0)
     else String.format(Locale.US, "%.0f MB", mb)
+    val nativeCtx = remember(file.absolutePath, file.lastModified()) {
+        if (profile.kind == ModelKind.TEXT_VISION) GgufInspector.inspect(file).nativeContext else 0
+    }
 
     Card(
         colors = CardDefaults.cardColors(
@@ -529,6 +640,9 @@ private fun ServerModelRow(
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(sizeText, color = palette.textSecondary, fontSize = 11.sp)
                     SmallTag(profile.kind.badge, palette.surfaceVariant, palette.textSecondary)
+                    if (nativeCtx > 0) {
+                        SmallTag("${formatCtxShort(nativeCtx)} ctx", palette.surfaceVariant, palette.onSurface)
+                    }
                     if (profile.hasVision()) {
                         SmallTag("VISION", palette.primary.copy(alpha = 0.18f), palette.primary)
                     }
@@ -585,6 +699,7 @@ private fun SmallTag(text: String, bg: Color, fg: Color) {
 @Composable
 private fun ServerSettingsModal(
     settings: AppSettings,
+    loadedModelNativeMaxCtx: Int,
     onDismiss: () -> Unit,
     onSave: (AppSettings) -> Unit
 ) {
@@ -632,7 +747,6 @@ private fun ServerSettingsModal(
                         .padding(start = 20.dp, end = 26.dp, top = 16.dp, bottom = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // Universal Auto-Tune banner
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -645,12 +759,14 @@ private fun ServerSettingsModal(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(hw.tierLabel, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = palette.onSurface)
-                            Text("Rec: ${hw.recommendedThreads} threads · ${hw.recommendedContext} ctx", fontSize = 11.sp, color = palette.textTertiary)
+                            val maxNote = if (loadedModelNativeMaxCtx > 0) " · Model Max: $loadedModelNativeMaxCtx" else ""
+                            Text("Rec: ${hw.recommendedThreads} threads$maxNote", fontSize = 11.sp, color = palette.textTertiary)
                         }
                         OutlinedButton(
                             onClick = {
                                 threads = hw.recommendedThreads.toString()
-                                ctx = hw.recommendedContext.toString()
+                                ctx = if (loadedModelNativeMaxCtx > 0) loadedModelNativeMaxCtx.toString() else hw.recommendedContext.toString()
+                                errorMsg = null
                             },
                             shape = RoundedCornerShape(6.dp),
                             border = BorderStroke(1.dp, palette.primary),
@@ -689,11 +805,23 @@ private fun ServerSettingsModal(
                         placeholder = "0"
                     )
 
+                    val ctxLabel = if (loadedModelNativeMaxCtx > 0) {
+                        "CONTEXT WINDOW (MODEL MAX: $loadedModelNativeMaxCtx · LOWER ANYTIME)"
+                    } else {
+                        "CONTEXT WINDOW (0 = AUTO MODEL MAX)"
+                    }
                     ModalField(
-                        label = "CONTEXT WINDOW (UNLIMITED · 0 = MODEL MAX, DEFAULT 8000)",
+                        label = ctxLabel,
                         value = ctx,
-                        onChange = { ctx = it.filter(Char::isDigit) },
-                        placeholder = "8000"
+                        onChange = { ctx = it.filter(Char::isDigit); errorMsg = null },
+                        placeholder = if (loadedModelNativeMaxCtx > 0) loadedModelNativeMaxCtx.toString() else "8000",
+                        trailingIcon = if (loadedModelNativeMaxCtx > 0) {
+                            {
+                                TextButton(onClick = { ctx = loadedModelNativeMaxCtx.toString(); errorMsg = null }) {
+                                    Text("Max", fontSize = 11.sp, color = palette.primary, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        } else null
                     )
 
                     Row(
@@ -760,12 +888,17 @@ private fun ServerSettingsModal(
                             errorMsg = "API Key must be at least 8 characters."
                             return@Button
                         }
+                        val parsedCtx = ctx.toIntOrNull() ?: 8000
+                        if (loadedModelNativeMaxCtx > 0 && parsedCtx > loadedModelNativeMaxCtx) {
+                            errorMsg = "Cannot exceed this model's max context ($loadedModelNativeMaxCtx). Click 'Max' or enter a lower value."
+                            return@Button
+                        }
                         onSave(
                             settings.copy(
                                 port = port.toIntOrNull() ?: 8080,
                                 lanAccess = lan,
                                 threadsOverride = threads.toIntOrNull() ?: 0,
-                                contextSize = ctx.toIntOrNull() ?: 8000,
+                                contextSize = parsedCtx,
                                 requireAuth = auth,
                                 apiKey = trimmedKey
                             ).validated()

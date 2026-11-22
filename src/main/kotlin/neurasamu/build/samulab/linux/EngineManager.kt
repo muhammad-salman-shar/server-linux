@@ -193,12 +193,19 @@ class EngineManager {
         val hw = HardwareDetector.detect()
         val threads = if (safeSettings.threadsOverride > 0) safeSettings.threadsOverride else hw.recommendedThreads
 
+        val ggufInfo = GgufInspector.inspect(modelPath.toFile())
+        val effectiveCtx = when {
+            safeSettings.contextSize <= 0 -> ggufInfo.nativeContext.takeIf { it > 0 } ?: 0
+            ggufInfo.nativeContext > 0 && safeSettings.contextSize > ggufInfo.nativeContext -> ggufInfo.nativeContext
+            else -> safeSettings.contextSize
+        }
+
         val cmd = mutableListOf(
             binary.absolutePath,
             "-m", modelPath.toAbsolutePath().toString(),
             "--host", "127.0.0.1",
             "--port", "8091",
-            "-c", safeSettings.contextSize.toString(),
+            "-c", effectiveCtx.toString(),
             "-t", threads.toString(),
             "-tb", threads.toString(),
             "--jinja"
@@ -306,8 +313,9 @@ class EngineManager {
             "qwen3", "deepseek-r1", "deepseek_r1", "qwq", "thinking", "reason", "r1-", "o1", "o3", "cogito", "marco-o1", "glm-4.5", "gpt-oss"
         ).any { nameLower.contains(it) }
 
-        var templateHintsThinking = false
-        var nativeCtx = 0
+        val ggufInfo = GgufInspector.inspect(modelFile)
+        var templateHintsThinking = ggufInfo.templateHintsThinking
+        var nativeCtx = ggufInfo.nativeContext
         var propsVision = profile.hasVision()
 
         runCatching {
@@ -322,7 +330,8 @@ class EngineManager {
                         templateHintsThinking = true
                     }
                     val genSettings = j.optJSONObject("default_generation_settings")
-                    nativeCtx = genSettings?.optInt("n_ctx", 0) ?: 0
+                    val serverCtx = genSettings?.optInt("n_ctx", 0) ?: 0
+                    if (nativeCtx <= 0 && serverCtx > 0) nativeCtx = serverCtx
                     val modalities = j.optJSONObject("modalities")
                     if (modalities?.optBoolean("vision", false) == true) {
                         propsVision = true
